@@ -1,5 +1,5 @@
 /* 拾光集 · 校园二手交易平台（Node.js + MySQL 全栈演示版）
- * 前端通过 REST API 读取/同步本机 MySQL 数据库；支付为模拟钱包。
+ * 前端通过 REST API 读取/同步 MySQL 数据库；支付为模拟钱包。
  */
 const DB_KEY = 'shiguang_app_v2';
 const SESSION_KEY = 'shiguang_app_session_v2';
@@ -217,7 +217,7 @@ function shell(content) {
     </div>
   </header>
   <main class="main">${content}</main>
-  <footer class="footer">拾光集 · 校园二手交易平台演示版　|　数据保存在本机 MySQL，支付为模拟钱包，不涉及真实资金　|　建议使用 Edge / Chrome 打开</footer>`;
+  <footer class="footer">拾光集 · 校园二手交易平台演示版　|　数据保存在 Railway MySQL，支付为模拟钱包，不涉及真实资金　|　建议使用 Edge / Chrome 打开</footer>`;
 }
 function renderRoute(user) {
   switch (ui.route) {
@@ -265,7 +265,7 @@ function renderLogin() {
           </div>
           <div class="login-note" style="margin-top:9px">密码：学生 123456　运营 admin123</div>
         </div>
-        <div class="login-note">这是 Node.js + MySQL 全栈演示版，数据保存在本机数据库 shiguangji；点击“我的 → 重置演示数据”可以恢复初始状态。</div>
+        <div class="login-note">这是 Node.js + MySQL 全栈演示版，数据保存在 Railway 云端数据库 shiguangji；点击“我的 → 重置演示数据”可以恢复初始状态。</div>
       </div>
     </section>
   </div>`;
@@ -781,7 +781,7 @@ function viewMy(user) {
   <div class="panel" style="padding:6px 16px">${myOrders.length ? myOrders.slice(0, 3).map(o => { const it = getItem(o.itemId); return `<div class="my-item-row" onclick="go('orderDetail',{orderId:'${o.id}'})"><div class="order-thumb" style="background:${it ? thumbBg(it) : CAT_STYLE['教材']}">${it ? thumbChar(it) : '物'}</div><div style="flex:1"><b>${esc(it ? it.title : '物品已删除')}</b><small>${o.id} · ${money(o.amount)} · ${fmtTime(o.createdAt)}</small></div><div class="right">${statusPill(o.status)}</div></div>`; }).join('') : '<div class="empty" style="border:0;padding:26px 0">还没有订单。<button class="btn ghost" style="margin-top:12px" onclick="go(\'home\')">去逛逛</button></div>'}</div>
   <div class="panel" style="margin-top:16px">
     <h3 style="margin:0 0 6px;font-size:13px">演示数据</h3>
-    <p class="small muted" style="line-height:1.7;margin:0 0 12px">所有数据保存在本机 MySQL 数据库 shiguangji。重置会清空发布、订单、流水、评价和审核记录，恢复初始演示状态。</p>
+    <p class="small muted" style="line-height:1.7;margin:0 0 12px">所有数据保存在 Railway 云端 MySQL 数据库 shiguangji。重置会清空发布、订单、流水、评价和审核记录，恢复初始演示状态。</p>
     <button class="btn danger" onclick="resetDemo()">重置演示数据</button>
   </div>`;
 }
