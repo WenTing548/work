@@ -97,6 +97,12 @@ async function addHistory(conn, itemId, action, fromStatus, toStatus, actorId, n
     [id('h'), itemId, action, fromStatus || null, toStatus || null, actorId || null, String(note || '').slice(0, 200), Date.now()]
   );
 }
+async function cancelActiveIntentsForItem(conn, itemId) {
+  await conn.query(
+    "UPDATE swap_intents SET status='cancelled' WHERE status='active' AND (my_item_id=? OR target_item_id=?)",
+    [itemId, itemId]
+  );
+}
 function mapSwapIntent(r) {
   return {
     id: r.id, userId: r.user_id, myItemId: r.my_item_id,
@@ -473,6 +479,8 @@ async function payOrder(orderId, userId) {
     await conn.query("UPDATE orders SET status='to_deliver', paid_at=? WHERE id=?", [Date.now(), orderId]);
     await conn.query('INSERT INTO payments (id,user_id,order_id,type,amount,note,at) VALUES (?,?,?,?,?,?,?)', [id('t'), userId, orderId, '支付', order.amount, '订单 ' + orderId + ' · 平台托管', Date.now()]);
     await addHistory(conn, order.item_id, 'paid', 'locked', 'locked', userId, '支付成功，进入平台托管');
+    // 购买支付成功即视为交易成立：取消该物品尚未匹配的置换意向，避免“已卖出但仍显示置换中”。
+    await cancelActiveIntentsForItem(conn, order.item_id);
     await conn.commit();
     const [rows] = await conn.query('SELECT * FROM orders WHERE id=?', [orderId]);
     return mapOrder(rows[0]);

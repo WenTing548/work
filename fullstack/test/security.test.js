@@ -366,6 +366,13 @@ test('P5 两人置换：互相意向、双方确认、完成互换', async t => 
     assert.equal(bootstrap.data.db.items.find(item => item.id === 'i1').status, 'locked');
     assert.equal(bootstrap.data.db.items.find(item => item.id === 'i3').status, 'locked');
     assert.equal(bootstrap.data.db.swaps.plans.length, 1);
+
+    const buyLocked = await request('/api/orders', {
+      method: 'POST',
+      cookie: s1,
+      body: { itemId: 'i1', delivery: 'face' }
+    });
+    assert.equal(buyLocked.status, 409);
   });
 
   await t.test('双方确认后生成两张 0 元置换单', async () => {
@@ -454,5 +461,39 @@ test('P5 两人置换：互相意向、双方确认、完成互换', async t => 
     assert.equal(state.data.db.items.find(item => item.id === 'i1').status, 'on_sale');
     assert.equal(state.data.db.items.find(item => item.id === 'i3').status, 'on_sale');
     assert.equal(state.data.db.swaps.plans[0].status, 'cancelled');
+  });
+
+  await t.test('物品被买下并支付后，未匹配的置换意向自动取消', async () => {
+    const resetAgain = await request('/api/reset', {
+      method: 'POST',
+      cookie: adminCookie,
+      body: { confirm: 'RESET' }
+    });
+    assert.equal(resetAgain.status, 200);
+
+    const buyer = await login('student1', '123456');
+    const intent = await request('/api/swaps/intents', {
+      method: 'POST',
+      cookie: buyer,
+      body: { myItemId: 'i3', targetItemId: 'i1' }
+    });
+    assert.equal(intent.status, 200);
+    assert.equal(intent.data.intent.status, 'active');
+
+    const order = await request('/api/orders', {
+      method: 'POST',
+      cookie: buyer,
+      body: { itemId: 'i1', delivery: 'face' }
+    });
+    assert.equal(order.status, 200);
+    const pay = await request(`/api/orders/${order.data.order.id}/pay`, {
+      method: 'POST',
+      cookie: buyer
+    });
+    assert.equal(pay.status, 200);
+
+    const state = await request('/api/bootstrap', { cookie: buyer });
+    const stale = state.data.db.swaps.intents.find(item => item.id === intent.data.intent.id);
+    assert.equal(stale.status, 'cancelled');
   });
 });
