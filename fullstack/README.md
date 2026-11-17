@@ -9,7 +9,7 @@
 | 前端 | 原生 HTML/CSS/JavaScript，响应式布局，无框架依赖 |
 | 后端 | Node.js 原生 `http` 模块 + `mysql2` 连接池 |
 | 数据库 | MySQL 8.0，数据库 `shiguangji`，专用账号 `shiguang` |
-| 鉴权 | 演示版使用用户 ID 会话；生产应改为 JWT/Session + 密码哈希 |
+| 鉴权 | 密码使用 bcrypt 哈希；登录签发 HttpOnly JWT Cookie。业务接口的 Cookie 鉴权仍在改造中，当前仍兼容请求体 `userId`，不能当生产安全版本 |
 | 支付 | **模拟钱包 + 平台托管**，不接入微信/支付宝，不涉及真实资金 |
 
 ## 2. 目录
@@ -107,7 +107,9 @@ node server.js --open
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/health` | 健康检查 |
-| POST | `/api/login` | 登录 |
+| POST | `/api/login` | 登录，成功时返回 `Set-Cookie: sg_token=...` |
+| POST | `/api/logout` | 退出登录，清除 Cookie |
+| GET | `/api/me` | 读取当前登录用户（需要 Cookie） |
 | POST | `/api/register` | 注册（赠送 ¥300 演示余额） |
 | GET | `/api/bootstrap?userId=` | 拉取当前用户 + 全部演示数据 |
 | POST | `/api/sync` | 前端状态同步到 MySQL（演示版采用整体快照同步） |
@@ -142,7 +144,7 @@ node server.js --open
 ## 9. 已知边界（请如实说明）
 
 - 支付是**模拟钱包**，没有真实支付通道。
-- 会话是演示级用户 ID，不是生产级 JWT；密码未做 bcrypt 哈希。
+- 会话：密码已使用 bcrypt 哈希；登录已签发 HttpOnly JWT Cookie，并提供 `/api/me`、`/api/logout`。但业务接口尚未全部改为从 Cookie 认人，审核/支付/交付等仍读取请求体 `userId`/`operatorId`，**当前仍可被伪造身份，不能当生产安全版本**。
 - 前端采用**整体快照同步**，适合课程演示；生产应改为按业务接口写入并加事务/幂等/并发控制。
 - 未实现：真实图片上传、学籍认证对接、悬赏/三方置换、仲裁、消息通知、压测、线上部署。
 - 6 张核心表可跑通交易闭环，但不是报告里 21 张表的全部落地。
@@ -159,7 +161,12 @@ GitHub Pages 只能托管静态页面，不能运行本项目的 Node.js + MySQL
 - Railway 同时部署 Node 和 MySQL；
 - GitHub Codespaces 临时演示。
 
-`server.js` 已支持云平台的 `PORT`、`DB_HOST`、`DB_PORT`、`DB_USER`、`DB_PASSWORD`、`DB_NAME`、`DB_SSL` 环境变量，并监听 `0.0.0.0`。
+`server.js` 已支持云平台的 `PORT`、`DB_HOST`、`DB_PORT`、`DB_USER`、`DB_PASSWORD`、`DB_NAME`、`DB_SSL` 环境变量，并监听 `0.0.0.0`。登录 Cookie 还需要：
+
+- `JWT_SECRET`：生产环境必须设置为长随机字符串；
+- `COOKIE_SECURE=true`：线上 HTTPS 环境建议开启，本地 HTTP 调试不要开启。
+
+本地不设置 `JWT_SECRET` 时会使用开发默认值并打印警告，不能用于公网。
 
 ## 11. 与报告的关系
 

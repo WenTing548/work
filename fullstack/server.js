@@ -5,6 +5,7 @@ const { URL } = require('url');
 const { exec } = require('child_process');
 const mysql = require('mysql2/promise');
 const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 
 const BASE_PORT = Number(process.env.PORT || 3000);
 const DB_CONFIG = {
@@ -73,6 +74,49 @@ function mapReview(r) {
 }
 function mapAudit(r) {
   return { id: r.id, itemId: r.item_id, result: r.result, reason: r.reason, operatorId: r.operator_id, at: n(r.at) };
+}
+
+const SESSION_COOKIE = 'sg_token';
+const SESSION_MAX_AGE = 7 * 24 * 60 * 60;
+const JWT_SECRET = process.env.JWT_SECRET || 'dev-only-change-me-shiguangji-2026';
+const COOKIE_SECURE = process.env.COOKIE_SECURE === 'true';
+if (!process.env.JWT_SECRET) {
+  console.warn('[auth] JWT_SECRET 未设置，使用开发默认值；部署到公网前必须设置。');
+}
+
+function parseCookies(req) {
+  const header = req.headers.cookie || '';
+  return header.split(';').reduce((acc, part) => {
+    const index = part.indexOf('=');
+    if (index === -1) return acc;
+    const key = part.slice(0, index).trim();
+    let value = part.slice(index + 1).trim();
+    if (!key) return acc;
+    try { value = decodeURIComponent(value); } catch (e) { /* 保留原始值 */ }
+    acc[key] = value;
+    return acc;
+  }, {});
+}
+
+function sessionCookie(token, maxAge = SESSION_MAX_AGE) {
+  return `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${COOKIE_SECURE ? '; Secure' : ''}`;
+}
+
+function signSession(user) {
+  return jwt.sign({ sub: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+}
+
+async function getAuthUser(req) {
+  const token = parseCookies(req)[SESSION_COOKIE];
+  if (!token) return null;
+  try {
+    const payload = jwt.verify(token, JWT_SECRET);
+    if (!payload || !payload.sub) return null;
+    const [rows] = await pool.query('SELECT * FROM users WHERE id = ? LIMIT 1', [payload.sub]);
+    return rows[0] ? mapUser(rows[0]) : null;
+  } catch (e) {
+    return null;
+  }
 }
 
 async function init() {
@@ -464,7 +508,24 @@ async function routeApi(req, res, url) {
   const p = url.pathname;
   if (p === '/api/health' && req.method === 'GET') return sendJson(res, 200, { ok: true, service: 'shiguangji-mysql' });
   if (p === '/api/bootstrap' && req.method === 'GET') return sendJson(res, 200, await bootstrap(url.searchParams.get('userId')));
-  if (p === '/api/login' && req.method === 'POST') return sendJson(res, 200, { user: await login(await readBody(req)) });
+  if (p === '/api/login' && req.method === 'POST') {
+    const user = await login(await readBody(req));
+    return sendJson(res, 200, { user }, {
+      'Set-Cookie': sessionCookie(signSession(user)),
+      'Cache-Control': 'no-store'
+    });
+  }
+  if (p === '/api/logout' && req.method === 'POST') {
+    return sendJson(res, 200, { ok: true }, {
+      'Set-Cookie': sessionCookie('', 0),
+      'Cache-Control': 'no-store'
+    });
+  }
+  if (p === '/api/me' && req.method === 'GET') {
+    const user = await getAuthUser(req);
+    if (!user) throw httpError(401, '请先登录');
+    return sendJson(res, 200, { user }, { 'Cache-Control': 'no-store' });
+  }
   if (p === '/api/register' && req.method === 'POST') return sendJson(res, 200, { user: await register(await readBody(req)) });
   if (p === '/api/items' && req.method === 'POST') return sendJson(res, 200, { item: await publishItem(await readBody(req)) });
   if (p === '/api/orders' && req.method === 'POST') return sendJson(res, 200, { order: await createOrder(await readBody(req)) });
@@ -498,9 +559,13 @@ async function routeApi(req, res, url) {
   throw httpError(404, '接口不存在');
 }
 
-function sendJson(res, status, data) {
+function sendJson(res, status, data, extraHeaders = {}) {
   const body = JSON.stringify(data);
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body) });
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': Buffer.byteLength(body),
+    ...extraHeaders
+  });
   res.end(body);
 }
 function readBody(req) {
