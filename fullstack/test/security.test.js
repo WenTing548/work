@@ -31,7 +31,7 @@ async function resetDb() {
   const conn = await mysql.createConnection(DB);
   try {
     await conn.query('SET FOREIGN_KEY_CHECKS=0');
-    await conn.query('DROP TABLE IF EXISTS item_history, swap_plans, swap_intents, audits, reviews, payments, orders, items, users');
+    await conn.query('DROP TABLE IF EXISTS delivery_records, arbitration_requests, credit_records, notifications, favorites, wanted_posts, verification_records, item_images, platform_accounts, pickup_points, student_roster, categories, item_history, swap_plans, swap_intents, audits, reviews, payments, orders, items, users');
     await conn.query('SET FOREIGN_KEY_CHECKS=1');
   } finally {
     await conn.end();
@@ -495,5 +495,160 @@ test('P5 两人置换：互相意向、双方确认、完成互换', async t => 
     const state = await request('/api/bootstrap', { cookie: buyer });
     const stale = state.data.db.swaps.intents.find(item => item.id === intent.data.intent.id);
     assert.equal(stale.status, 'cancelled');
+  });
+});
+
+test('P6 21 张表与新功能：分类、认证、图片、收藏、求购、交付、信用、仲裁、通知', async t => {
+  const admin = await login('admin', 'admin123');
+  const s1 = await login('student1', '123456');
+  const s2 = await login('student2', '123456');
+
+  await t.test('21 张业务表全部存在', async () => {
+    const conn = await mysql.createConnection(DB);
+    try {
+      const [rows] = await conn.query('SHOW TABLES');
+      assert.equal(rows.length, 21, `expected 21 tables, got ${rows.length}`);
+    } finally {
+      await conn.end();
+    }
+  });
+
+  await t.test('管理员维护分类、自提点和学籍', async () => {
+    const suffix = Date.now().toString().slice(-6);
+    const category = await request('/api/categories', {
+      method: 'POST', cookie: admin, body: { name: `测试分类${suffix}`, sort: 99 }
+    });
+    assert.equal(category.status, 200);
+    assert.equal(category.data.category.name, `测试分类${suffix}`);
+
+    const pickup = await request('/api/admin/pickup-points', {
+      method: 'POST', cookie: admin, body: { name: `测试自提点${suffix}`, address: '图书馆一楼', contact: '值班老师' }
+    });
+    assert.equal(pickup.status, 200);
+
+    const imported = await request('/api/admin/roster/import', {
+      method: 'POST', cookie: admin,
+      body: { students: [{ studentNo: `T${suffix}`, name: '测试学生', college: '计算机学院', major: '软件工程', grade: '2023', className: '软工2301' }] }
+    });
+    assert.equal(imported.status, 200);
+    assert.equal(imported.data.imported, 1);
+  });
+
+  let publishedItem;
+  await t.test('发布带图片物品，审核后写图片、履历和通知', async () => {
+    const title = `测试相机 ${Date.now().toString().slice(-5)}`;
+    const publish = await request('/api/items', {
+      method: 'POST', cookie: s1,
+      body: {
+        title, categoryId: 'c1', price: 66, originalPrice: 120,
+        condition: '90', description: '功能正常，配原装包。', delivery: '面交',
+        images: ['https://example.com/a.jpg', 'https://example.com/b.jpg']
+      }
+    });
+    assert.equal(publish.status, 200, JSON.stringify(publish.data));
+    publishedItem = publish.data.item;
+    assert.equal(publishedItem.status, 'pending');
+    assert.equal(publishedItem.categoryId, 'c1');
+
+    const approve = await request(`/api/items/${encodeURIComponent(publishedItem.id)}/approve`, {
+      method: 'POST', cookie: admin, body: {}
+    });
+    assert.equal(approve.status, 200);
+
+    const state = await request('/api/bootstrap', { cookie: s1 });
+    const item = state.data.db.items.find(i => i.id === publishedItem.id);
+    assert.equal(item.status, 'on_sale');
+    assert.equal(state.data.db.images.filter(img => img.itemId === publishedItem.id).length, 2);
+    assert.ok(state.data.db.history.some(h => h.itemId === publishedItem.id && h.action === 'approved'));
+    assert.ok(state.data.db.notifications.some(n => n.type === 'audit'));
+  });
+
+  await t.test('学籍认证提交与管理员审核', async () => {
+    const submit = await request('/api/verifications', {
+      method: 'POST', cookie: s2, body: { studentNo: '20230002', realName: '陈同学' }
+    });
+    assert.equal(submit.status, 200, JSON.stringify(submit.data));
+    assert.equal(submit.data.verification.status, 'pending');
+
+    const review = await request(`/api/admin/verifications/${encodeURIComponent(submit.data.verification.id)}/review`, {
+      method: 'POST', cookie: admin, body: { action: 'approve', reason: '' }
+    });
+    assert.equal(review.status, 200, JSON.stringify(review.data));
+    assert.equal(review.data.verification.status, 'approved');
+  });
+
+  await t.test('收藏与求购写入新表', async () => {
+    const fav = await request(`/api/favorites/${encodeURIComponent(publishedItem.id)}/toggle`, {
+      method: 'POST', cookie: s2
+    });
+    assert.equal(fav.status, 200);
+    assert.equal(fav.data.favorited, true);
+
+    const wanted = await request('/api/wanted', {
+      method: 'POST', cookie: s2,
+      body: { title: `求购测试 ${Date.now().toString().slice(-5)}`, categoryId: 'c1', keywords: '相机', budgetMin: 20, budgetMax: 80 }
+    });
+    assert.equal(wanted.status, 200);
+    assert.equal(wanted.data.wanted.status, 'open');
+  });
+
+  let order;
+  await t.test('下单、支付、交付、确认写入平台账户、交付记录和信用流水', async () => {
+    const beforeState = await request('/api/bootstrap', { cookie: admin });
+    const beforeEscrow = beforeState.data.db.platform.escrowBalance;
+    const created = await request('/api/orders', {
+      method: 'POST', cookie: s2, body: { itemId: publishedItem.id }
+    });
+    assert.equal(created.status, 200, JSON.stringify(created.data));
+    order = created.data.order;
+    assert.equal(order.amount, 66);
+
+    const pay = await request(`/api/orders/${encodeURIComponent(order.id)}/pay`, {
+      method: 'POST', cookie: s2
+    });
+    assert.equal(pay.status, 200, JSON.stringify(pay.data));
+
+    const deliver = await request(`/api/orders/${encodeURIComponent(order.id)}/deliver`, {
+      method: 'POST', cookie: s1
+    });
+    assert.equal(deliver.status, 200, JSON.stringify(deliver.data));
+
+    const confirm = await request(`/api/orders/${encodeURIComponent(order.id)}/confirm`, {
+      method: 'POST', cookie: s2
+    });
+    assert.equal(confirm.status, 200, JSON.stringify(confirm.data));
+
+    const state = await request('/api/bootstrap', { cookie: admin });
+    const delivery = state.data.db.deliveries.find(d => d.orderId === order.id);
+    assert.ok(delivery, 'delivery record should exist');
+    assert.ok(delivery.deliveredAt);
+    assert.ok(delivery.confirmedAt);
+    assert.equal(state.data.db.platform.escrowBalance, beforeEscrow);
+    assert.ok(state.data.db.creditRecords.some(c => c.userId === 'u1' && c.refId === order.id && c.change === 2));
+    assert.ok(state.data.db.creditRecords.some(c => c.userId === 'u2' && c.refId === order.id && c.change === 2));
+  });
+
+  await t.test('仲裁申请与管理员裁定', async () => {
+    const create = await request('/api/arbitrations', {
+      method: 'POST', cookie: s2, body: { orderId: order.id, reason: '物品与描述不符', evidence: '照片' }
+    });
+    assert.equal(create.status, 200, JSON.stringify(create.data));
+    const arbitration = create.data.arbitration;
+    const decide = await request(`/api/admin/arbitrations/${encodeURIComponent(arbitration.id)}/decide`, {
+      method: 'POST', cookie: admin, body: { action: 'support', result: '支持买家，退款并回滚' }
+    });
+    assert.equal(decide.status, 200, JSON.stringify(decide.data));
+    assert.equal(decide.data.arbitration.status, 'supported');
+  });
+
+  await t.test('通知可读取并清空未读', async () => {
+    const before = await request('/api/bootstrap', { cookie: s1 });
+    assert.ok(before.data.db.notifications.length > 0);
+    const mark = await request('/api/notifications/read', {
+      method: 'POST', cookie: s1, body: {}
+    });
+    assert.equal(mark.status, 200);
+    const after = await request('/api/bootstrap', { cookie: s1 });
+    assert.equal(after.data.db.stats.unreadNotifications, 0);
   });
 });

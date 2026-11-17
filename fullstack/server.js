@@ -58,6 +58,7 @@ function mapPublicUser(r) {
 function mapItem(r) {
   return {
     id: r.id, ownerId: r.owner_id, title: r.title, category: r.category,
+    categoryId: r.category_id || null,
     price: Number(r.price), originalPrice: Number(r.original_price),
     condition: r.condition_level, description: r.description,
     delivery: r.delivery, status: r.status, createdAt: n(r.created_at),
@@ -69,7 +70,7 @@ function mapOrder(r) {
     id: r.id, itemId: r.item_id, buyerId: r.buyer_id, sellerId: r.seller_id,
     amount: Number(r.amount), status: r.status,
     orderType: r.order_type || 'normal', planId: r.plan_id || null,
-    delivery: r.delivery,
+    delivery: r.delivery, pickupPointId: r.pickup_point_id || null,
     createdAt: n(r.created_at), deadline: n(r.deadline), paidAt: n(r.paid_at),
     deliveredAt: n(r.delivered_at), completedAt: n(r.completed_at),
     cancelledAt: n(r.cancelled_at), reviewed: !!r.reviewed
@@ -119,6 +120,57 @@ function mapSwapPlan(r) {
     aConfirmedAt: n(r.a_confirmed_at), bConfirmedAt: n(r.b_confirmed_at),
     completedAt: n(r.completed_at), cancelledAt: n(r.cancelled_at)
   };
+}
+function mapCategory(r) {
+  return { id: r.id, name: r.name, parentId: r.parent_id || null, sort: r.sort, status: r.status, createdAt: n(r.created_at) };
+}
+function mapRoster(r) {
+  return { studentNo: r.student_no, name: r.name, college: r.college, major: r.major, grade: r.grade, className: r.class_name, status: r.status, importedAt: n(r.imported_at) };
+}
+function mapVerification(r) {
+  return { id: r.id, userId: r.user_id, studentNo: r.student_no, realName: r.real_name, college: r.college, status: r.status, reason: r.reason, reviewedBy: r.reviewed_by || null, createdAt: n(r.created_at), reviewedAt: n(r.reviewed_at) };
+}
+function mapImage(r) {
+  return { id: r.id, itemId: r.item_id, url: r.url, sort: r.sort, isPrimary: !!r.is_primary, status: r.status, createdAt: n(r.created_at) };
+}
+function mapPlatform(r) {
+  return { id: r.id, accountType: r.account_type, escrowBalance: Number(r.escrow_balance), totalIn: Number(r.total_in), totalOut: Number(r.total_out), updatedAt: n(r.updated_at) };
+}
+function mapPickup(r) {
+  return { id: r.id, name: r.name, address: r.address, contact: r.contact, status: r.status, createdAt: n(r.created_at) };
+}
+function mapDelivery(r) {
+  return { id: r.id, orderId: r.order_id, method: r.method, pickupPointId: r.pickup_point_id || null, pickupCode: r.pickup_code || '', deliveredAt: n(r.delivered_at), confirmedAt: n(r.confirmed_at), operatorId: r.operator_id || null, note: r.note || '' };
+}
+function mapCredit(r) {
+  return { id: r.id, userId: r.user_id, change: r.change_value, reason: r.reason, refType: r.ref_type || null, refId: r.ref_id || null, createdAt: n(r.created_at) };
+}
+function mapNotification(r) {
+  return { id: r.id, userId: r.user_id, type: r.type, title: r.title, body: r.body, readAt: n(r.read_at), createdAt: n(r.created_at) };
+}
+function mapFavorite(r) {
+  return { id: r.id, userId: r.user_id, itemId: r.item_id, createdAt: n(r.created_at) };
+}
+function mapWanted(r) {
+  return { id: r.id, userId: r.user_id, title: r.title, categoryId: r.category_id || null, keywords: r.keywords, budgetMin: Number(r.budget_min), budgetMax: Number(r.budget_max), condition: r.condition_level, status: r.status, createdAt: n(r.created_at), expiresAt: n(r.expires_at) };
+}
+function mapArbitration(r) {
+  return { id: r.id, orderId: r.order_id, applicantId: r.applicant_id, reason: r.reason, evidence: r.evidence, status: r.status, result: r.result, operatorId: r.operator_id || null, createdAt: n(r.created_at), decidedAt: n(r.decided_at) };
+}
+async function notify(conn, userId, type, title, body) {
+  if (!userId) return;
+  await conn.query(
+    'INSERT INTO notifications (id,user_id,type,title,body,read_at,created_at) VALUES (?,?,?,?,?,NULL,?)',
+    [id('n'), userId, type, String(title).slice(0, 80), String(body || '').slice(0, 300), Date.now()]
+  );
+}
+async function addCredit(conn, userId, change, reason, refType, refId) {
+  if (!userId || !change) return;
+  await conn.query('UPDATE users SET credit = GREATEST(0, credit + ?) WHERE id = ?', [change, userId]);
+  await conn.query(
+    'INSERT INTO credit_records (id,user_id,change_value,reason,ref_type,ref_id,created_at) VALUES (?,?,?,?,?,?,?)',
+    [id('cr'), userId, change, String(reason).slice(0, 120), refType || null, refId || null, Date.now()]
+  );
 }
 
 const SESSION_COOKIE = 'sg_token';
@@ -190,11 +242,49 @@ async function ensureColumn(table, column, definition) {
 async function init() {
   const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
   await pool.query(schema);
-  // 兼容已有 6 表数据库：orders 新增置换单标记；新库则由 schema.sql 直接建列。
+  // 兼容已有数据库：新增列不重建表，旧数据保留。
   await ensureColumn('orders', 'order_type', "VARCHAR(16) NOT NULL DEFAULT 'normal'");
   await ensureColumn('orders', 'plan_id', 'VARCHAR(32) NULL');
+  await ensureColumn('items', 'category_id', 'VARCHAR(32) NULL');
+  await ensureColumn('orders', 'pickup_point_id', 'VARCHAR(32) NULL');
+  await ensureLookupData();
   const [[row]] = await pool.query('SELECT COUNT(*) AS c FROM users');
   if (Number(row.c) === 0) await seed();
+  await ensureLookupData();
+}
+async function ensureLookupData() {
+  const now = Date.now();
+  const categories = [
+    ['c1', '教材', null, 10],
+    ['c2', '出行', null, 20],
+    ['c3', '生活', null, 30],
+    ['c4', '乐器', null, 40],
+    ['c5', '数码', null, 50]
+  ];
+  for (const c of categories) {
+    await pool.query(
+      'INSERT INTO categories (id,name,parent_id,sort,status,created_at) VALUES (?,?,?,?,?,?) ON DUPLICATE KEY UPDATE name=VALUES(name)',
+      [c[0], c[1], c[2], c[3], 'active', now]
+    );
+  }
+  await pool.query(
+    `INSERT IGNORE INTO student_roster (student_no,name,college,major,grade,class_name,status,imported_at) VALUES
+     ('20230001','林同学','计算机学院','软件工程','2023','软工2301','active',?),
+     ('20230002','陈同学','机械学院','机械设计','2023','机械2301','active',?)`,
+    [now, now]
+  );
+  await pool.query(
+    "INSERT IGNORE INTO platform_accounts (id,account_type,escrow_balance,total_in,total_out,updated_at) VALUES ('pa_escrow','escrow',0,0,0,?)",
+    [now]
+  );
+  await pool.query(
+    "INSERT IGNORE INTO pickup_points (id,name,address,contact,status,created_at) VALUES ('pp1','图书馆一楼服务台','图书馆一楼东侧','学生事务中心','active',?)",
+    [now]
+  );
+  await pool.query(
+    `UPDATE items SET category_id=(SELECT id FROM categories WHERE categories.name=items.category LIMIT 1)
+     WHERE category_id IS NULL`
+  );
 }
 
 async function seed() {
@@ -299,6 +389,45 @@ async function bootstrap(currentUser) {
       ? `SELECT * FROM item_history WHERE item_id IN (${visibleItemIds.map(() => '?').join(',')}) ORDER BY created_at ASC`
       : null;
   const [history] = historySql ? await pool.query(historySql, isAdmin ? [] : visibleItemIds) : [[]];
+  const orderIds = orders.map(o => o.id);
+  const imageSql = isAdmin
+    ? "SELECT * FROM item_images WHERE status='active' ORDER BY item_id, sort, created_at"
+    : visibleItemIds.length
+      ? `SELECT * FROM item_images WHERE status='active' AND item_id IN (${visibleItemIds.map(() => '?').join(',')}) ORDER BY item_id, sort, created_at`
+      : null;
+  const deliverySql = isAdmin
+    ? 'SELECT * FROM delivery_records ORDER BY delivered_at DESC'
+    : orderIds.length
+      ? `SELECT * FROM delivery_records WHERE order_id IN (${orderIds.map(() => '?').join(',')}) ORDER BY delivered_at DESC`
+      : null;
+  const arbitrationSql = isAdmin
+    ? 'SELECT * FROM arbitration_requests ORDER BY created_at DESC'
+    : `SELECT * FROM arbitration_requests WHERE applicant_id = ?
+       OR order_id IN (SELECT id FROM orders WHERE buyer_id=? OR seller_id=?) ORDER BY created_at DESC`;
+  const verificationSql = isAdmin
+    ? 'SELECT * FROM verification_records ORDER BY created_at DESC'
+    : 'SELECT * FROM verification_records WHERE user_id=? ORDER BY created_at DESC';
+  const wantedSql = isAdmin
+    ? 'SELECT * FROM wanted_posts ORDER BY created_at DESC'
+    : "SELECT * FROM wanted_posts WHERE status='open' OR user_id=? ORDER BY created_at DESC";
+  const pickupSql = isAdmin
+    ? 'SELECT * FROM pickup_points ORDER BY created_at DESC'
+    : "SELECT * FROM pickup_points WHERE status='active' ORDER BY created_at DESC";
+  const creditSql = isAdmin
+    ? 'SELECT * FROM credit_records ORDER BY created_at DESC LIMIT 200'
+    : 'SELECT * FROM credit_records WHERE user_id=? ORDER BY created_at DESC LIMIT 100';
+  const [categories] = await pool.query(isAdmin ? 'SELECT * FROM categories ORDER BY sort,created_at' : "SELECT * FROM categories WHERE status='active' ORDER BY sort,created_at");
+  const [images] = imageSql ? await pool.query(imageSql, isAdmin ? [] : visibleItemIds) : [[]];
+  const [deliveries] = deliverySql ? await pool.query(deliverySql, isAdmin ? [] : orderIds) : [[]];
+  const [arbitrations] = await pool.query(arbitrationSql, isAdmin ? [] : [user.id, user.id, user.id]);
+  const [verifications] = await pool.query(verificationSql, isAdmin ? [] : [user.id]);
+  const [roster] = isAdmin ? await pool.query('SELECT * FROM student_roster ORDER BY college, student_no') : [[]];
+  const [wanted] = await pool.query(wantedSql, isAdmin ? [] : [user.id]);
+  const [pickups] = await pool.query(pickupSql);
+  const [creditRecords] = await pool.query(creditSql, isAdmin ? [] : [user.id]);
+  const [favorites] = await pool.query('SELECT * FROM favorites WHERE user_id=? ORDER BY created_at DESC', [user.id]);
+  const [notifications] = await pool.query('SELECT * FROM notifications WHERE user_id=? ORDER BY created_at DESC LIMIT 50', [user.id]);
+  const [platformRows] = isAdmin ? await pool.query("SELECT * FROM platform_accounts WHERE account_type='escrow' LIMIT 1") : [[]];
 
   // 只返回当前用户及当前数据里出现过的其他用户，避免全站用户资料暴露。
   const userIds = new Set([user.id]);
@@ -333,9 +462,22 @@ async function bootstrap(currentUser) {
         intents: intents.map(mapSwapIntent),
         plans: plans.map(mapSwapPlan)
       },
+      categories: categories.map(mapCategory),
+      images: images.map(mapImage),
+      favorites: favorites.map(mapFavorite),
+      notifications: notifications.map(mapNotification),
+      wanted: wanted.map(mapWanted),
+      arbitrations: arbitrations.map(mapArbitration),
+      verifications: verifications.map(mapVerification),
+      roster: roster.map(mapRoster),
+      pickupPoints: pickups.map(mapPickup),
+      deliveries: deliveries.map(mapDelivery),
+      creditRecords: creditRecords.map(mapCredit),
+      platform: platformRows[0] ? mapPlatform(platformRows[0]) : null,
       stats: {
         studentCount: Number(studentCountRow.c),
-        onSaleCount: Number(onSaleCountRow.c)
+        onSaleCount: Number(onSaleCountRow.c),
+        unreadNotifications: notifications.filter(x => !x.read_at).length
       }
     },
     user
@@ -392,13 +534,39 @@ async function publishItem(user, body) {
   const price = Number(body.price);
   if (title.length < 2) throw httpError(400, '标题至少 2 个字');
   if (!price || price <= 0) throw httpError(400, '请输入有效售价');
+  let categoryId = String(body.categoryId || '').trim() || null;
+  let categoryName = String(body.category || '教材').trim() || '教材';
+  if (categoryId) {
+    const [c] = await pool.query("SELECT * FROM categories WHERE id=? AND status='active'", [categoryId]);
+    if (!c[0]) throw httpError(400, '分类不存在');
+    categoryName = c[0].name;
+  }
   const itemId = id('i');
   const now = Date.now();
-  await pool.query(
-    'INSERT INTO items (id,owner_id,title,category,price,original_price,condition_level,description,delivery,status,created_at,views) VALUES (?,?,?,?,?,?,?,?,?,?,?,0)',
-    [itemId, user.id, title, String(body.category || '教材'), price, Number(body.originalPrice) || price, String(body.condition || '90'), String(body.description || ''), String(body.delivery || '面交/自提'), 'pending', now]
-  );
-  await addHistory(pool, itemId, 'published', null, 'pending', user.id, '发布，等待审核');
+  const images = Array.isArray(body.images) ? body.images.map(x => String(typeof x === 'string' ? x : x.url || '').trim()).filter(Boolean).slice(0, 6) : [];
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    await conn.query(
+      'INSERT INTO items (id,owner_id,title,category,category_id,price,original_price,condition_level,description,delivery,status,created_at,views) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0)',
+      [itemId, user.id, title, categoryName.slice(0, 20), categoryId, price, Number(body.originalPrice) || price, String(body.condition || '90'), String(body.description || ''), String(body.delivery || '面交/自提'), 'pending', now]
+    );
+    for (let i = 0; i < images.length; i++) {
+      await conn.query(
+        'INSERT INTO item_images (id,item_id,url,sort,is_primary,status,created_at) VALUES (?,?,?,?,?,?,?)',
+        [id('img'), itemId, images[i].slice(0, 500), i, i === 0 ? 1 : 0, 'active', now]
+      );
+    }
+    await addHistory(conn, itemId, 'published', null, 'pending', user.id, '发布，等待审核');
+    const [admins] = await conn.query("SELECT id FROM users WHERE role='admin'");
+    for (const a of admins) await notify(conn, a.id, 'audit', '新的待审核物品', `${user.name} 发布了「${title}」，请审核。`);
+    await conn.commit();
+  } catch (e) {
+    await conn.rollback();
+    throw e;
+  } finally {
+    conn.release();
+  }
   const [rows] = await pool.query('SELECT * FROM items WHERE id = ?', [itemId]);
   return mapItem(rows[0]);
 }
@@ -411,6 +579,7 @@ async function approveItem(itemId, operator) {
   await pool.query("UPDATE items SET status='on_sale' WHERE id=?", [itemId]);
   await pool.query('INSERT INTO audits (id,item_id,result,reason,operator_id,at) VALUES (?,?,?,?,?,?)', [id('a'), itemId, '通过', '', operator.id, Date.now()]);
   await addHistory(pool, itemId, 'approved', 'pending', 'on_sale', operator.id, '审核通过，自动上架');
+  await notify(pool, items[0].owner_id, 'audit', '物品审核通过', `「${items[0].title}」已上架。`);
   const [rows] = await pool.query('SELECT * FROM items WHERE id=?', [itemId]);
   return mapItem(rows[0]);
 }
@@ -423,6 +592,7 @@ async function rejectItem(itemId, operator, reason) {
   await pool.query("UPDATE items SET status='rejected', reject_reason=? WHERE id=?", [reason || '未填写原因', itemId]);
   await pool.query('INSERT INTO audits (id,item_id,result,reason,operator_id,at) VALUES (?,?,?,?,?,?)', [id('a'), itemId, '驳回', reason || '未填写原因', operator.id, Date.now()]);
   await addHistory(pool, itemId, 'rejected', 'pending', 'rejected', operator.id, reason || '未填写原因');
+  await notify(pool, items[0].owner_id, 'audit', '物品审核未通过', `「${items[0].title}」被驳回：${reason || '未填写原因'}`);
   const [rows] = await pool.query('SELECT * FROM items WHERE id=?', [itemId]);
   return mapItem(rows[0]);
 }
@@ -439,11 +609,17 @@ async function createOrder(body, buyer) {
     if (item.status !== 'on_sale') throw httpError(409, '该物品当前不可购买');
     if (item.owner_id === buyer.id) throw httpError(400, '不能购买自己发布的物品');
     if (Number(buyer.balance) < Number(item.price)) throw httpError(400, '余额不足，请先到钱包充值');
+    const pickupPointId = body.pickupPointId ? String(body.pickupPointId) : null;
+    if (pickupPointId) {
+      const [pp] = await conn.query("SELECT id FROM pickup_points WHERE id=? AND status='active'", [pickupPointId]);
+      if (!pp[0]) throw httpError(400, '自提点不存在');
+    }
     const orderId = id('o');
     const now = Date.now();
-    await conn.query('INSERT INTO orders (id,item_id,buyer_id,seller_id,amount,status,delivery,created_at,deadline,reviewed) VALUES (?,?,?,?,?,?,?,?,?,0)', [orderId, itemId, buyer.id, item.owner_id, item.price, 'unpaid', item.delivery, now, now + 30000]);
+    await conn.query('INSERT INTO orders (id,item_id,buyer_id,seller_id,amount,status,delivery,created_at,deadline,reviewed,pickup_point_id) VALUES (?,?,?,?,?,?,?,?,?,0,?)', [orderId, itemId, buyer.id, item.owner_id, item.price, 'unpaid', item.delivery, now, now + 30000, pickupPointId]);
     await conn.query("UPDATE items SET status='locked' WHERE id=?", [itemId]);
     await addHistory(conn, itemId, 'locked', 'on_sale', 'locked', buyer.id, '买家下单，物品锁定');
+    await notify(conn, item.owner_id, 'order', '收到新订单', `${buyer.name} 下单了「${item.title}」，等待买家支付。`);
     await conn.commit();
     const [rows] = await conn.query('SELECT * FROM orders WHERE id=?', [orderId]);
     return mapOrder(rows[0]);
@@ -478,7 +654,12 @@ async function payOrder(orderId, userId) {
     await conn.query('UPDATE users SET balance = balance - ? WHERE id=?', [order.amount, userId]);
     await conn.query("UPDATE orders SET status='to_deliver', paid_at=? WHERE id=?", [Date.now(), orderId]);
     await conn.query('INSERT INTO payments (id,user_id,order_id,type,amount,note,at) VALUES (?,?,?,?,?,?,?)', [id('t'), userId, orderId, '支付', order.amount, '订单 ' + orderId + ' · 平台托管', Date.now()]);
+    await conn.query(
+      "UPDATE platform_accounts SET escrow_balance=escrow_balance+?, total_in=total_in+?, updated_at=? WHERE account_type='escrow'",
+      [order.amount, order.amount, Date.now()]
+    );
     await addHistory(conn, order.item_id, 'paid', 'locked', 'locked', userId, '支付成功，进入平台托管');
+    await notify(conn, order.seller_id, 'order', '买家已支付', `订单 ${orderId} 已支付，请尽快交付。`);
     // 购买支付成功即视为交易成立：取消该物品尚未匹配的置换意向，避免“已卖出但仍显示置换中”。
     await cancelActiveIntentsForItem(conn, order.item_id);
     await conn.commit();
@@ -505,6 +686,7 @@ async function cancelOrder(orderId, userId) {
     await conn.query("UPDATE orders SET status='cancelled', cancelled_at=? WHERE id=?", [Date.now(), orderId]);
     await conn.query("UPDATE items SET status='on_sale' WHERE id=? AND status='locked'", [order.item_id]);
     await addHistory(conn, order.item_id, 'unlocked', 'locked', 'on_sale', userId, '买家取消订单，物品解锁');
+    await notify(conn, order.seller_id, 'order', '买家取消订单', `订单 ${orderId} 已取消，物品重新上架。`);
     await conn.commit();
     const [rows] = await conn.query('SELECT * FROM orders WHERE id=?', [orderId]);
     return mapOrder(rows[0]);
@@ -517,16 +699,35 @@ async function cancelOrder(orderId, userId) {
 }
 
 async function deliverOrder(orderId, userId) {
-  const [orders] = await pool.query('SELECT * FROM orders WHERE id=?', [orderId]);
-  const order = orders[0];
-  if (!order) throw httpError(404, '订单不存在');
-  if (order.order_type === 'swap') throw httpError(409, '置换单请在“置换”页面处理');
-  if (order.seller_id !== userId) throw httpError(403, '只有卖家可以确认交付');
-  if (order.status !== 'to_deliver') throw httpError(409, '订单状态不允许交付');
-  await pool.query("UPDATE orders SET status='to_confirm', delivered_at=? WHERE id=?", [Date.now(), orderId]);
-  await addHistory(pool, order.item_id, 'delivered', 'locked', 'locked', userId, '卖家确认交付，等待买家确认');
-  const [rows] = await pool.query('SELECT * FROM orders WHERE id=?', [orderId]);
-  return mapOrder(rows[0]);
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [orders] = await conn.query('SELECT * FROM orders WHERE id=? FOR UPDATE', [orderId]);
+    const order = orders[0];
+    if (!order) throw httpError(404, '订单不存在');
+    if (order.order_type === 'swap') throw httpError(409, '置换单请在“置换”页面处理');
+    if (order.seller_id !== userId) throw httpError(403, '只有卖家可以确认交付');
+    if (order.status !== 'to_deliver') throw httpError(409, '订单状态不允许交付');
+    const now = Date.now();
+    const pickupCode = order.pickup_point_id ? ('P' + Math.random().toString(36).slice(2, 6).toUpperCase()) : null;
+    await conn.query("UPDATE orders SET status='to_confirm', delivered_at=? WHERE id=?", [now, orderId]);
+    await conn.query(
+      `INSERT INTO delivery_records (id,order_id,method,pickup_point_id,pickup_code,delivered_at,confirmed_at,operator_id,note)
+       VALUES (?,?,?,?,?,?,NULL,?,?)
+       ON DUPLICATE KEY UPDATE method=VALUES(method), pickup_point_id=VALUES(pickup_point_id), pickup_code=VALUES(pickup_code), delivered_at=VALUES(delivered_at), operator_id=VALUES(operator_id)`,
+      [id('d'), orderId, order.delivery || '面交', order.pickup_point_id || null, pickupCode, now, userId, '卖家确认交付']
+    );
+    await addHistory(conn, order.item_id, 'delivered', 'locked', 'locked', userId, '卖家确认交付，等待买家确认');
+    await notify(conn, order.buyer_id, 'order', '卖家已交付', `订单 ${orderId} 已交付，请确认收货。`);
+    await conn.commit();
+    const [rows] = await conn.query('SELECT * FROM orders WHERE id=?', [orderId]);
+    return mapOrder(rows[0]);
+  } catch (e) {
+    await conn.rollback();
+    throw e;
+  } finally {
+    conn.release();
+  }
 }
 
 async function confirmOrder(orderId, userId) {
@@ -541,10 +742,18 @@ async function confirmOrder(orderId, userId) {
     if (order.status !== 'to_confirm') throw httpError(409, '订单状态不允许确认');
     await conn.query("UPDATE orders SET status='completed', completed_at=? WHERE id=?", [Date.now(), orderId]);
     await conn.query("UPDATE items SET status='completed' WHERE id=?", [order.item_id]);
-    await conn.query('UPDATE users SET balance = balance + ?, credit = LEAST(100, credit + 2) WHERE id=?', [order.amount, order.seller_id]);
-    await conn.query('UPDATE users SET credit = LEAST(100, credit + 2) WHERE id=?', [order.buyer_id]);
+    await conn.query('UPDATE users SET balance = balance + ? WHERE id=?', [order.amount, order.seller_id]);
     await conn.query('INSERT INTO payments (id,user_id,order_id,type,amount,note,at) VALUES (?,?,?,?,?,?,?)', [id('t'), order.seller_id, orderId, '放款', order.amount, '订单 ' + orderId + ' · 托管放款', Date.now()]);
+    await conn.query(
+      "UPDATE platform_accounts SET escrow_balance=GREATEST(0, escrow_balance-?), total_out=total_out+?, updated_at=? WHERE account_type='escrow'",
+      [order.amount, order.amount, Date.now()]
+    );
+    await conn.query('UPDATE delivery_records SET confirmed_at=? WHERE order_id=?', [Date.now(), orderId]);
+    await addCredit(conn, order.seller_id, 2, '交易完成', 'order', orderId);
+    await addCredit(conn, order.buyer_id, 2, '交易完成', 'order', orderId);
     await addHistory(conn, order.item_id, 'completed', 'locked', 'completed', userId, '买家确认收货，交易完成');
+    await notify(conn, order.seller_id, 'order', '交易完成，已放款', `订单 ${orderId} 已完成，款项已到余额。`);
+    await notify(conn, order.buyer_id, 'order', '交易完成', `订单 ${orderId} 已确认收货，感谢使用拾光集。`);
     await conn.commit();
     const [rows] = await conn.query('SELECT * FROM orders WHERE id=?', [orderId]);
     return mapOrder(rows[0]);
@@ -853,19 +1062,174 @@ async function completeSwapPlan(planId, userId) {
   }
 }
 
+async function createCategory(user, body) {
+  requireAdmin(user);
+  const name = String(body.name || '').trim();
+  if (!name) throw httpError(400, '分类名称不能为空');
+  const cid = String(body.id || id('cat'));
+  const parentId = body.parentId ? String(body.parentId) : null;
+  await pool.query(
+    `INSERT INTO categories (id,name,parent_id,sort,status,created_at) VALUES (?,?,?,?,?,?)
+     ON DUPLICATE KEY UPDATE name=VALUES(name), parent_id=VALUES(parent_id), sort=VALUES(sort), status=VALUES(status)`,
+    [cid, name.slice(0, 40), parentId, Number(body.sort) || 0, body.status === 'inactive' ? 'inactive' : 'active', Date.now()]
+  );
+  return mapCategory((await pool.query('SELECT * FROM categories WHERE id=?', [cid]))[0][0]);
+}
+async function createPickupPoint(user, body) {
+  requireAdmin(user);
+  const name = String(body.name || '').trim();
+  if (!name) throw httpError(400, '自提点名称不能为空');
+  const pid = String(body.id || id('pp'));
+  await pool.query(
+    `INSERT INTO pickup_points (id,name,address,contact,status,created_at) VALUES (?,?,?,?,?,?)
+     ON DUPLICATE KEY UPDATE name=VALUES(name), address=VALUES(address), contact=VALUES(contact), status=VALUES(status)`,
+    [pid, name.slice(0, 60), String(body.address || '').slice(0, 120), String(body.contact || '').slice(0, 60), body.status === 'inactive' ? 'inactive' : 'active', Date.now()]
+  );
+  return mapPickup((await pool.query('SELECT * FROM pickup_points WHERE id=?', [pid]))[0][0]);
+}
+async function importRoster(user, body) {
+  requireAdmin(user);
+  const rows = Array.isArray(body.students) ? body.students.slice(0, 500) : [];
+  if (!rows.length) throw httpError(400, '没有可导入的学籍记录');
+  let count = 0;
+  for (const r of rows) {
+    const studentNo = String(r.studentNo || '').trim();
+    const name = String(r.name || '').trim();
+    if (!studentNo || !name) continue;
+    await pool.query(
+      `INSERT INTO student_roster (student_no,name,college,major,grade,class_name,status,imported_at) VALUES (?,?,?,?,?,?,?,?)
+       ON DUPLICATE KEY UPDATE name=VALUES(name), college=VALUES(college), major=VALUES(major), grade=VALUES(grade), class_name=VALUES(class_name), status=VALUES(status)`,
+      [studentNo, name.slice(0, 40), String(r.college || '').slice(0, 60), String(r.major || '').slice(0, 60), String(r.grade || '').slice(0, 10), String(r.className || '').slice(0, 60), 'active', Date.now()]
+    );
+    count++;
+  }
+  return { imported: count };
+}
+async function submitVerification(user, body) {
+  if (user.role !== 'student') throw httpError(403, '只有学生可以认证');
+  const studentNo = String(body.studentNo || '').trim();
+  const realName = String(body.realName || '').trim();
+  if (!studentNo || !realName) throw httpError(400, '请填写学号和姓名');
+  const [roster] = await pool.query("SELECT * FROM student_roster WHERE student_no=? AND status='active'", [studentNo]);
+  if (!roster[0]) throw httpError(400, '学籍库中找不到该学号');
+  if (roster[0].name !== realName) throw httpError(400, '姓名与学籍库不一致');
+  const [pending] = await pool.query("SELECT * FROM verification_records WHERE user_id=? AND status='pending' LIMIT 1", [user.id]);
+  if (pending[0]) throw httpError(409, '已有待审核的认证申请');
+  const vid = id('v');
+  await pool.query(
+    'INSERT INTO verification_records (id,user_id,student_no,real_name,college,status,reason,reviewed_by,created_at,reviewed_at) VALUES (?,?,?,?,?,?,\'\',NULL,?,NULL)',
+    [vid, user.id, studentNo, realName, roster[0].college, 'pending', Date.now()]
+  );
+  return mapVerification((await pool.query('SELECT * FROM verification_records WHERE id=?', [vid]))[0][0]);
+}
+async function reviewVerification(user, idValue, body) {
+  requireAdmin(user);
+  const approve = body.action === 'approve';
+  const [rows] = await pool.query('SELECT * FROM verification_records WHERE id=?', [idValue]);
+  const rec = rows[0];
+  if (!rec) throw httpError(404, '认证申请不存在');
+  if (rec.status !== 'pending') throw httpError(409, '该申请已处理');
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    await conn.query("UPDATE verification_records SET status=?, reason=?, reviewed_by=?, reviewed_at=? WHERE id=?", [approve ? 'approved' : 'rejected', String(body.reason || '').slice(0, 200), user.id, Date.now(), idValue]);
+    if (approve) {
+      await conn.query('UPDATE users SET verified=1, college=? WHERE id=?', [rec.college || '', rec.user_id]);
+      await notify(conn, rec.user_id, 'verify', '学籍认证通过', '你的校园身份已认证，可以发布和下单。');
+    } else {
+      await notify(conn, rec.user_id, 'verify', '学籍认证未通过', String(body.reason || '信息与学籍库不一致'));
+    }
+    await conn.commit();
+  } catch (e) {
+    await conn.rollback();
+    throw e;
+  } finally {
+    conn.release();
+  }
+  return mapVerification((await pool.query('SELECT * FROM verification_records WHERE id=?', [idValue]))[0][0]);
+}
+async function toggleFavorite(user, itemId) {
+  const [items] = await pool.query("SELECT id FROM items WHERE id=?", [itemId]);
+  if (!items[0]) throw httpError(404, '物品不存在');
+  const [rows] = await pool.query('SELECT * FROM favorites WHERE user_id=? AND item_id=?', [user.id, itemId]);
+  if (rows[0]) {
+    await pool.query('DELETE FROM favorites WHERE user_id=? AND item_id=?', [user.id, itemId]);
+    return { favorited: false };
+  }
+  await pool.query('INSERT INTO favorites (id,user_id,item_id,created_at) VALUES (?,?,?,?)', [id('f'), user.id, itemId, Date.now()]);
+  return { favorited: true };
+}
+async function readNotifications(user, body) {
+  if (body.id) {
+    await pool.query('UPDATE notifications SET read_at=? WHERE id=? AND user_id=? AND read_at IS NULL', [Date.now(), String(body.id), user.id]);
+  } else {
+    await pool.query('UPDATE notifications SET read_at=? WHERE user_id=? AND read_at IS NULL', [Date.now(), user.id]);
+  }
+  return { ok: true };
+}
+async function createWanted(user, body) {
+  if (user.role !== 'student') throw httpError(403, '只有学生可以发布求购');
+  const title = String(body.title || '').trim();
+  if (title.length < 2) throw httpError(400, '求购标题至少 2 个字');
+  const wid = id('w');
+  await pool.query(
+    'INSERT INTO wanted_posts (id,user_id,title,category_id,keywords,budget_min,budget_max,condition_level,status,created_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+    [wid, user.id, title.slice(0, 80), body.categoryId ? String(body.categoryId) : null, String(body.keywords || '').slice(0, 120), Number(body.budgetMin) || 0, Number(body.budgetMax) || 0, String(body.condition || '90'), 'open', Date.now(), Date.now() + 7 * 86400000]
+  );
+  return mapWanted((await pool.query('SELECT * FROM wanted_posts WHERE id=?', [wid]))[0][0]);
+}
+async function createArbitration(user, body) {
+  const orderId = String(body.orderId || '');
+  const reason = String(body.reason || '').trim();
+  if (!reason) throw httpError(400, '请填写仲裁原因');
+  const [orders] = await pool.query('SELECT * FROM orders WHERE id=?', [orderId]);
+  const order = orders[0];
+  if (!order) throw httpError(404, '订单不存在');
+  if (order.buyer_id !== user.id && order.seller_id !== user.id) throw httpError(403, '只能对自己的订单申请仲裁');
+  if (order.status !== 'completed' && order.status !== 'to_confirm') throw httpError(409, '当前订单状态不能申请仲裁');
+  const aid = id('ar');
+  await pool.query(
+    'INSERT INTO arbitration_requests (id,order_id,applicant_id,reason,evidence,status,result,operator_id,created_at,decided_at) VALUES (?,?,?,?,?,?,\'\',NULL,?,NULL)',
+    [aid, orderId, user.id, reason.slice(0, 500), String(body.evidence || '').slice(0, 1000), 'pending', Date.now()]
+  );
+  const [admins] = await pool.query("SELECT id FROM users WHERE role='admin'");
+  for (const a of admins) await notify(pool, a.id, 'arbitration', '新的仲裁申请', `订单 ${orderId} 申请仲裁：${reason}`);
+  return mapArbitration((await pool.query('SELECT * FROM arbitration_requests WHERE id=?', [aid]))[0][0]);
+}
+async function decideArbitration(user, idValue, body) {
+  requireAdmin(user);
+  const [rows] = await pool.query('SELECT * FROM arbitration_requests WHERE id=?', [idValue]);
+  const rec = rows[0];
+  if (!rec) throw httpError(404, '仲裁申请不存在');
+  if (rec.status !== 'pending') throw httpError(409, '该申请已处理');
+  const status = ['support', 'support_buyer', 'support_seller'].includes(body.action) ? 'supported' : 'rejected';
+  await pool.query('UPDATE arbitration_requests SET status=?, result=?, operator_id=?, decided_at=? WHERE id=?', [status, String(body.result || '').slice(0, 500), user.id, Date.now(), idValue]);
+  await notify(pool, rec.applicant_id, 'arbitration', '仲裁结果已出', String(body.result || '运营已完成仲裁'));
+  return mapArbitration((await pool.query('SELECT * FROM arbitration_requests WHERE id=?', [idValue]))[0][0]);
+}
+
 async function resetData() {
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
+    await conn.query('DELETE FROM delivery_records');
+    await conn.query('DELETE FROM arbitration_requests');
+    await conn.query('DELETE FROM credit_records');
+    await conn.query('DELETE FROM notifications');
+    await conn.query('DELETE FROM favorites');
+    await conn.query('DELETE FROM wanted_posts');
+    await conn.query('DELETE FROM verification_records');
     await conn.query('DELETE FROM reviews');
     await conn.query('DELETE FROM payments');
     await conn.query('DELETE FROM audits');
     await conn.query('DELETE FROM item_history');
-    await conn.query('DELETE FROM orders');
+    await conn.query('DELETE FROM item_images');
     await conn.query('DELETE FROM swap_plans');
     await conn.query('DELETE FROM swap_intents');
+    await conn.query('DELETE FROM orders');
     await conn.query('DELETE FROM items');
     await conn.query('DELETE FROM users');
+    await conn.query("UPDATE platform_accounts SET escrow_balance=0,total_in=0,total_out=0,updated_at=? WHERE account_type='escrow'", [Date.now()]);
     await conn.commit();
   } catch (e) {
     await conn.rollback();
@@ -874,6 +1238,7 @@ async function resetData() {
     conn.release();
   }
   await seed();
+  await ensureLookupData();
 }
 
 async function syncState(snapshot) {
@@ -1028,6 +1393,49 @@ async function routeApi(req, res, url) {
   if (p === '/api/wallet/recharge' && req.method === 'POST') {
     const user = await requireAuth(req);
     return sendJson(res, 200, { user: await recharge(user) });
+  }
+  if (p === '/api/categories' && req.method === 'POST') {
+    const user = await requireAuth(req);
+    return sendJson(res, 200, { category: await createCategory(user, await readBody(req)) });
+  }
+  if (p === '/api/admin/pickup-points' && req.method === 'POST') {
+    const user = await requireAuth(req);
+    return sendJson(res, 200, { pickupPoint: await createPickupPoint(user, await readBody(req)) });
+  }
+  if (p === '/api/admin/roster/import' && req.method === 'POST') {
+    const user = await requireAuth(req);
+    return sendJson(res, 200, await importRoster(user, await readBody(req)));
+  }
+  if (p === '/api/verifications' && req.method === 'POST') {
+    const user = await requireAuth(req);
+    return sendJson(res, 200, { verification: await submitVerification(user, await readBody(req)) });
+  }
+  const vr = p.match(/^\/api\/admin\/verifications\/([^/]+)\/review$/);
+  if (vr && req.method === 'POST') {
+    const user = await requireAuth(req);
+    return sendJson(res, 200, { verification: await reviewVerification(user, vr[1], await readBody(req)) });
+  }
+  const fav = p.match(/^\/api\/favorites\/([^/]+)\/toggle$/);
+  if (fav && req.method === 'POST') {
+    const user = await requireAuth(req);
+    return sendJson(res, 200, await toggleFavorite(user, fav[1]));
+  }
+  if (p === '/api/notifications/read' && req.method === 'POST') {
+    const user = await requireAuth(req);
+    return sendJson(res, 200, await readNotifications(user, await readBody(req)));
+  }
+  if (p === '/api/wanted' && req.method === 'POST') {
+    const user = await requireAuth(req);
+    return sendJson(res, 200, { wanted: await createWanted(user, await readBody(req)) });
+  }
+  if (p === '/api/arbitrations' && req.method === 'POST') {
+    const user = await requireAuth(req);
+    return sendJson(res, 200, { arbitration: await createArbitration(user, await readBody(req)) });
+  }
+  const arb = p.match(/^\/api\/admin\/arbitrations\/([^/]+)\/decide$/);
+  if (arb && req.method === 'POST') {
+    const user = await requireAuth(req);
+    return sendJson(res, 200, { arbitration: await decideArbitration(user, arb[1], await readBody(req)) });
   }
   if (p === '/api/sync' && req.method === 'POST') {
     // 正常业务已改为按接口写入；整体快照会删全库，默认关闭。

@@ -40,7 +40,7 @@ const HISTORY_LABEL = {
   swap_locked: '置换锁定', swap_cancelled: '置换取消', swap_completed: '置换完成'
 };
 
-let db = { users: [], items: [], orders: [], reviews: [], tx: [], audits: [], history: [], swaps: { intents: [], plans: [] } };
+let db = { users: [], items: [], orders: [], reviews: [], tx: [], audits: [], history: [], swaps: { intents: [], plans: [] }, categories: [], images: [], favorites: [], notifications: [], wanted: [], arbitrations: [], verifications: [], roster: [], pickupPoints: [], deliveries: [], creditRecords: [], platform: null };
 let currentUserId = store.getItem(SESSION_KEY) || null;
 let countdownTimer = null;
 let reviewRating = 5;
@@ -130,7 +130,7 @@ async function refreshState(renderAfter = true) {
   if (res.status === 401) {
     currentUserId = null;
     store.removeItem(SESSION_KEY);
-    db = { users: [], items: [], orders: [], reviews: [], tx: [], audits: [], history: [], swaps: { intents: [], plans: [] } };
+    db = { users: [], items: [], orders: [], reviews: [], tx: [], audits: [], history: [], swaps: { intents: [], plans: [] }, categories: [], images: [], favorites: [], notifications: [], wanted: [], arbitrations: [], verifications: [], roster: [], pickupPoints: [], deliveries: [], creditRecords: [], platform: null };
     if (renderAfter) renderLogin();
     return null;
   }
@@ -139,6 +139,8 @@ async function refreshState(renderAfter = true) {
   db = data.db;
   db.history = db.history || [];
   db.swaps = db.swaps || { intents: [], plans: [] };
+  for (const key of ['categories', 'images', 'favorites', 'notifications', 'wanted', 'arbitrations', 'verifications', 'roster', 'pickupPoints', 'deliveries', 'creditRecords']) db[key] = db[key] || [];
+  db.platform = db.platform || null;
   if (data.user) {
     currentUserId = data.user.id;
     store.setItem(SESSION_KEY, currentUserId);
@@ -208,15 +210,18 @@ function render() {
 function shell(content) {
   const user = me();
   const isAdmin = user.role === 'admin';
+  const unread = (db.notifications || []).filter(n => !n.readAt).length;
   const nav = [
     ['home', '首页'],
     ['publish', '发布闲置'],
     ['swaps', '置换'],
+    ['wanted', '求购'],
     ['orders', '我的订单'],
+    ['notifications', `通知${unread ? `<span class="nav-dot">${unread}</span>` : ''}`],
     ['wallet', '钱包'],
     ['my', '我的']
   ];
-  if (isAdmin) nav.splice(1, 4, ['admin', '审核后台'], ['orders', '全部订单']);
+  if (isAdmin) nav.splice(1, 5, ['admin', '审核后台'], ['orders', '全部订单'], ['notifications', `通知${unread ? `<span class="nav-dot">${unread}</span>` : ''}`]);
   return `
   <header class="app-header">
     <div class="header-inner">
@@ -242,6 +247,8 @@ function renderRoute(user) {
     case 'detail': return viewDetail(user);
     case 'publish': return viewPublish(user);
     case 'swaps': return viewSwaps(user);
+    case 'wanted': return viewWanted(user);
+    case 'notifications': return viewNotifications(user);
     case 'orders': return viewOrders(user);
     case 'orderDetail': return viewOrderDetail(user);
     case 'wallet': return viewWallet(user);
@@ -425,6 +432,62 @@ function doSearch(e) {
 }
 function setCat(cat) { ui.cat = cat; render(); }
 
+/* ---------- wanted / notifications ---------- */
+function viewWanted(user) {
+  const list = (db.wanted || []).filter(w => w.status === 'open').sort((a, b) => b.createdAt - a.createdAt);
+  const cats = (db.categories || []).filter(c => c.status === 'active');
+  const form = user.role === 'student' ? `
+    <div class="panel" style="margin-bottom:18px">
+      <div class="section-head"><div><h2>发布求购</h2><p>写下想要的物品，卖家上架后更容易被匹配。</p></div></div>
+      <form onsubmit="createWanted(event)">
+        <div class="form-grid">
+          <div class="field span2"><label>求购标题</label><input name="title" placeholder="例如：收一本线性代数 第六版" maxlength="60" required></div>
+          <div class="field"><label>分类</label><select name="categoryId">${cats.map(c => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')}</select></div>
+          <div class="field"><label>关键词</label><input name="keywords" placeholder="线性代数, 同济"></div>
+          <div class="field"><label>预算下限</label><input name="budgetMin" type="number" min="0" value="10"></div>
+          <div class="field"><label>预算上限</label><input name="budgetMax" type="number" min="0" value="40"></div>
+        </div>
+        <div class="submit-row"><button class="btn orange" type="submit">发布求购</button></div>
+      </form>
+    </div>` : '';
+  return `<div class="page-head"><div><h1>求购广场</h1><p>买家发出需求，卖家可以主动联系；当前为演示版，不自动撮合。</p></div></div>
+  ${form}
+  <div class="section-head"><div><h2>正在求购</h2><p>${list.length} 条</p></div></div>
+  ${list.length ? `<div class="order-list">${list.map(w => {
+    const owner = getUser(w.userId);
+    return `<div class="order-card"><div class="order-main"><div class="order-thumb" style="background:linear-gradient(145deg,#d8b67a,#a67a3f)">求</div><div class="order-item"><b>${esc(w.title)}</b><small>${esc(owner ? owner.name : '同学')} · ${esc((db.categories.find(c => c.id === w.categoryId) || {}).name || '不限分类')} · ${fmtTime(w.createdAt)}</small><span class="tag">预算 ${money(w.budgetMin)} - ${money(w.budgetMax)}</span></div></div><div class="order-actions"><span class="status completed">求购中</span><button class="btn ghost small" onclick="toast('已记录联系意向（演示环境不接入聊天）')">联系 TA</button></div></div>`;
+  }).join('')}</div>` : `<div class="empty">还没有求购信息，发布第一条吧。</div>`}`;
+}
+async function createWanted(e) {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  try {
+    await api('/api/wanted', {
+      title: String(fd.get('title') || '').trim(),
+      categoryId: String(fd.get('categoryId') || ''),
+      keywords: String(fd.get('keywords') || '').trim(),
+      budgetMin: Number(fd.get('budgetMin')) || 0,
+      budgetMax: Number(fd.get('budgetMax')) || 0
+    });
+    await refreshState(false);
+    toast('求购已发布');
+    go('wanted');
+  } catch (err) { toast(err.message || '发布失败'); }
+}
+function viewNotifications(user) {
+  const list = (db.notifications || []).slice().sort((a, b) => b.createdAt - a.createdAt);
+  const unread = list.filter(n => !n.readAt).length;
+  return `<div class="page-head"><div><h1>通知</h1><p>${unread ? `${unread} 条未读` : '全部已读'}</p></div><button class="btn ghost" onclick="readNotifications()">全部标为已读</button></div>
+  ${list.length ? `<div class="order-list">${list.map(n => `<div class="order-card" style="${n.readAt ? 'opacity:.72' : ''}"><div class="order-main"><div class="order-thumb" style="background:${n.type === 'audit' ? 'linear-gradient(145deg,#4f6d8f,#283d58)' : 'linear-gradient(145deg,#2f5d4d,#173f35)'}">${n.readAt ? '读' : '新'}</div><div class="order-item"><b>${esc(n.title)}</b><small>${esc(n.body)}</small><span class="tag">${fmtTime(n.createdAt)}</span></div></div><div class="order-actions">${n.readAt ? '' : `<button class="btn ghost small" onclick="readNotifications('${n.id}')">标为已读</button>`}</div></div>`).join('')}</div>` : `<div class="empty">还没有通知。审核、支付、交付和仲裁结果会出现在这里。</div>`}`;
+}
+async function readNotifications(id) {
+  try {
+    await api('/api/notifications/read', id ? { id } : {});
+    await refreshState(false);
+    render();
+  } catch (err) { toast(err.message || '操作失败'); }
+}
+
 /* ---------- detail ---------- */
 function viewDetail(user) {
   const item = getItem(ui.itemId);
@@ -438,6 +501,10 @@ function viewDetail(user) {
   else if (user.role === 'admin') { buyLabel = '运营账号不能购买'; disabled = true; }
   else if (item.status !== 'on_sale') { buyLabel = itemStatusText(item.status); disabled = true; }
   const records = (db.history || []).filter(h => h.itemId === item.id);
+  const images = (db.images || []).filter(img => img.itemId === item.id).sort((a, b) => a.sort - b.sort);
+  const favorite = (db.favorites || []).some(f => f.itemId === item.id);
+  const pickupPoints = (db.pickupPoints || []).filter(p => p.status === 'active');
+  const canPickup = item.delivery.includes('自提') && pickupPoints.length;
   const history = records.length
     ? records.map(h => [
         HISTORY_LABEL[h.action] || h.action,
@@ -452,7 +519,7 @@ function viewDetail(user) {
   <div class="detail-layout">
     <div class="detail-visual" style="background:${thumbBg(item)}">
       <span class="badge">${esc(CONDITION_LABEL[item.condition] || item.condition)}</span>
-      <span class="big">${thumbChar(item)}</span>
+      ${images[0] ? `<img src="${esc(images[0].url)}" alt="${esc(item.title)}" style="width:100%;height:100%;object-fit:cover;border-radius:24px" onerror="this.style.display='none'">` : `<span class="big">${thumbChar(item)}</span>`}
     </div>
     <div class="detail-panel">
       <div class="item-cat">${esc(item.category)} · ${esc(item.delivery)}</div>
@@ -464,10 +531,12 @@ function viewDetail(user) {
         <div><b>${esc(seller ? seller.name : '未知卖家')} · ${esc(seller ? seller.college : '')}</b><small>${seller && seller.verified ? '已认证' : '未认证'} · 信用 ${seller ? seller.credit : '—'}</small></div>
         <span class="credit">信用 ${seller ? seller.credit : '—'}</span>
       </div>
-      <div class="detail-desc"><h3>物品描述</h3><p>${esc(item.description)}</p></div>
+      <div class="detail-desc"><h3>物品描述</h3><p>${esc(item.description)}</p>${images.length > 1 ? `<div class="image-strip">${images.map((img, i) => `<img src="${esc(img.url)}" alt="图片 ${i + 1}" onerror="this.style.display='none'">`).join('')}</div>` : ''}</div>
       <div class="history"><h3>物品履历</h3><div class="timeline">${history.map(([t, d]) => `<p>${t} · ${d}</p>`).join('')}</div></div>
+      ${canPickup ? `<div class="field"><label>自提点</label><select id="pickup-select">${pickupPoints.map(p => `<option value="${esc(p.id)}">${esc(p.name)} · ${esc(p.address)}</option>`).join('')}</select></div>` : ''}
       <div class="buy-row">
         <button class="btn ghost" onclick="toast('已发送联系请求（演示环境不接入聊天）')">联系卖家</button>
+        <button class="btn line" onclick="toggleFavorite('${item.id}')">${favorite ? '已收藏' : '收藏'}</button>
         <button class="btn orange" ${disabled ? 'disabled' : ''} onclick="buyItem('${item.id}')">${buyLabel}</button>
       </div>
       <div class="buy-note">下单后 30 秒内未支付会自动取消；支付金额先进入平台托管，确认收货后放款给卖家。</div>
@@ -483,13 +552,22 @@ async function buyItem(id) {
   if (user.role !== 'student') return toast('运营账号不能购买');
   if (user.balance < item.price) { toast('余额不足，请先到钱包充值'); return go('wallet'); }
   try {
-    const { order } = await api('/api/orders', { itemId: id });
+    const pickupEl = document.getElementById('pickup-select');
+    const { order } = await api('/api/orders', { itemId: id, pickupPointId: pickupEl ? pickupEl.value : null });
     await refreshState(false);
     toast('订单已创建，请在 30 秒内支付');
     go('orderDetail', { orderId: order.id });
   } catch (err) {
     toast(err.message || '下单失败');
   }
+}
+async function toggleFavorite(itemId) {
+  try {
+    const r = await api(`/api/favorites/${encodeURIComponent(itemId)}/toggle`);
+    await refreshState(false);
+    toast(r.favorited ? '已收藏' : '已取消收藏');
+    render();
+  } catch (err) { toast(err.message || '收藏失败'); }
 }
 function startCountdown() {
   clearInterval(countdownTimer);
@@ -784,12 +862,12 @@ function viewPublish(user) {
     <form onsubmit="publishItem(event)">
       <div class="form-grid">
         <div class="field span2"><label>标题</label><input name="title" placeholder="例如：高等数学 第七版" maxlength="60" required></div>
-        <div class="field"><label>分类</label><select name="category">${CATS.map(c => `<option>${c}</option>`).join('')}</select></div>
+        <div class="field"><label>分类</label><select name="categoryId">${(db.categories || []).filter(c => c.status === 'active').map(c => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')}</select></div>
         <div class="field"><label>成色</label><select name="condition">${Object.entries(CONDITION_LABEL).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select></div>
         <div class="field"><label>售价（元）</label><input name="price" type="number" min="0.01" step="0.01" placeholder="18" required></div>
         <div class="field"><label>原价（元）</label><input name="originalPrice" type="number" min="0" step="0.01" placeholder="45"></div>
         <div class="field"><label>交易方式</label><select name="delivery"><option>面交/自提</option><option>面交</option><option>自提</option></select></div>
-        <div class="field"><label>图片</label><input value="演示版使用分类封面" disabled></div>
+        <div class="field span2"><label>图片 URL（每行一张，最多 6 张）</label><textarea name="images" placeholder="https://example.com/photo1.jpg&#10;https://example.com/photo2.jpg"></textarea></div>
         <div class="field span2"><label>描述</label><textarea name="description" placeholder="成色、瑕疵、配件、可约地点……" required></textarea></div>
       </div>
       <div class="form-note">提交后进入“待审核”，运营在审核后台通过后才会出现在首页。演示环境会自动通过学籍认证。</div>
@@ -805,10 +883,11 @@ async function publishItem(e) {
   if (title.length < 2) return toast('标题至少 2 个字');
   if (!price || price <= 0) return toast('请输入有效售价');
   const payload = {
-    title, category: String(fd.get('category')),
+    title, categoryId: String(fd.get('categoryId') || ''),
     price, originalPrice: Number(fd.get('originalPrice')) || price,
     condition: String(fd.get('condition')), description: String(fd.get('description') || '').trim(),
-    delivery: String(fd.get('delivery'))
+    delivery: String(fd.get('delivery')),
+    images: String(fd.get('images') || '').split(/\s+/).map(s => s.trim()).filter(Boolean).slice(0, 6)
   };
   try {
     await api('/api/items', payload);
@@ -857,8 +936,8 @@ function viewAdmin(user) {
     <div class="stat-card"><b>${orders.length}</b><span>累计订单</span></div>
     <div class="stat-card"><b>${money(gmv)}</b><span>已完成成交额</span></div>
   </div>
-  <div class="toolbar"><div class="pills"><button class="${auditTab === 'audit' ? 'active' : ''}" onclick="ui.adminTab='audit';render()">审核队列</button><button class="${auditTab === 'items' ? 'active' : ''}" onclick="ui.adminTab='items';render()">全部物品</button><button class="${auditTab === 'orders' ? 'active' : ''}" onclick="ui.adminTab='orders';render()">全部订单</button></div></div>
-  ${auditTab === 'audit' ? renderAuditQueue(pending) : auditTab === 'items' ? renderAdminItems() : renderAdminOrders(orders)}`;
+  <div class="toolbar"><div class="pills"><button class="${auditTab === 'audit' ? 'active' : ''}" onclick="ui.adminTab='audit';render()">审核队列</button><button class="${auditTab === 'items' ? 'active' : ''}" onclick="ui.adminTab='items';render()">全部物品</button><button class="${auditTab === 'orders' ? 'active' : ''}" onclick="ui.adminTab='orders';render()">全部订单</button><button class="${auditTab === 'verifications' ? 'active' : ''}" onclick="ui.adminTab='verifications';render()">认证审核</button><button class="${auditTab === 'arbitrations' ? 'active' : ''}" onclick="ui.adminTab='arbitrations';render()">仲裁</button><button class="${auditTab === 'base' ? 'active' : ''}" onclick="ui.adminTab='base';render()">基础数据</button></div></div>
+  ${auditTab === 'audit' ? renderAuditQueue(pending) : auditTab === 'items' ? renderAdminItems() : auditTab === 'orders' ? renderAdminOrders(orders) : auditTab === 'verifications' ? renderVerifications() : auditTab === 'arbitrations' ? renderArbitrations() : renderAdminBase()}`;
 }
 function renderAuditQueue(pending) {
   if (!pending.length) return `<div class="empty">审核队列为空，所有物品都已处理。</div>`;
@@ -910,7 +989,92 @@ function renderAdminOrders(orders) {
   </tbody></table></div>`;
 }
 
+function renderVerifications() {
+  const rows = db.verifications || [];
+  if (!rows.length) return `<div class="empty">暂无认证申请。</div>`;
+  return `<div class="panel" style="padding:0;overflow:hidden"><table class="table"><thead><tr><th>学号</th><th>姓名</th><th>学院</th><th>状态</th><th>提交时间</th><th>操作</th></tr></thead><tbody>
+  ${rows.map(v => `<tr><td>${esc(v.studentNo)}</td><td>${esc(v.realName)}</td><td>${esc(v.college || '—')}</td><td>${v.status === 'pending' ? '<span class="tag">待审核</span>' : v.status === 'approved' ? '<span class="tag green">已通过</span>' : `<span class="tag red">已驳回</span><small>${esc(v.reason || '')}</small>`}</td><td>${fmtTime(v.createdAt)}</td><td>${v.status === 'pending' ? `<button class="btn small" onclick="reviewVerification('${v.id}','approved')">通过</button> <button class="btn danger small" onclick="reviewVerification('${v.id}','rejected')">驳回</button>` : '—'}</td></tr>`).join('')}
+  </tbody></table></div>`;
+}
+async function reviewVerification(id, action) {
+  let reason = '';
+  if (action === 'rejected') { reason = prompt('驳回原因：', '学号或姓名与学籍库不一致') || ''; if (!reason) return; }
+  try {
+    await api(`/api/admin/verifications/${encodeURIComponent(id)}/review`, { action: action === 'approved' ? 'approve' : 'reject', reason });
+    await refreshState(false);
+    toast(action === 'approved' ? '认证已通过' : '认证已驳回');
+    render();
+  } catch (err) { toast(err.message || '审核失败'); }
+}
+function renderArbitrations() {
+  const rows = db.arbitrations || [];
+  if (!rows.length) return `<div class="empty">暂无仲裁申请。</div>`;
+  return `<div class="panel" style="padding:0;overflow:hidden"><table class="table"><thead><tr><th>订单</th><th>申请人</th><th>原因</th><th>状态</th><th>申请时间</th><th>操作</th></tr></thead><tbody>
+  ${rows.map(a => `<tr><td>${esc(a.orderId)}</td><td>${esc((getUser(a.applicantId) || {}).name || a.applicantId)}</td><td style="max-width:260px">${esc(a.reason)}<br><small class="muted">${esc(a.evidence || '')}</small></td><td>${a.status === 'pending' ? '<span class="tag">待处理</span>' : `<span class="tag green">已裁定</span><small>${esc(a.result || '')}</small>`}</td><td>${fmtTime(a.createdAt)}</td><td>${a.status === 'pending' ? `<button class="btn small" onclick="decideArbitration('${a.id}','support_buyer')">支持买家</button> <button class="btn danger small" onclick="decideArbitration('${a.id}','support_seller')">支持卖家</button>` : '—'}</td></tr>`).join('')}
+  </tbody></table></div>`;
+}
+async function decideArbitration(id, action) {
+  const result = prompt('裁定说明：', action === 'support_buyer' ? '支持买家退款/回滚' : '支持卖家，售后关闭') || '';
+  try {
+    await api(`/api/admin/arbitrations/${encodeURIComponent(id)}/decide`, { action, result });
+    await refreshState(false);
+    toast('仲裁已处理');
+    render();
+  } catch (err) { toast(err.message || '处理失败'); }
+}
+function renderAdminBase() {
+  const cats = db.categories || [];
+  const points = db.pickupPoints || [];
+  const roster = db.roster || [];
+  return `<div class="grid-2">
+    <div class="panel"><h3 style="margin:0 0 12px;font-size:14px">分类管理</h3><form onsubmit="addCategory(event)" class="form-grid"><div class="field"><label>分类名</label><input name="name" placeholder="如：运动" required></div><div class="field"><label>排序</label><input name="sort" type="number" value="6"></div><div class="submit-row span2"><button class="btn orange" type="submit">新增分类</button></div></form><div style="margin-top:12px">${cats.map(c => `<div class="my-item-row"><div style="flex:1"><b>${esc(c.name)}</b><small>${c.status} · 排序 ${c.sort}</small></div></div>`).join('') || '<div class="muted small">暂无分类</div>'}</div></div>
+    <div class="panel"><h3 style="margin:0 0 12px;font-size:14px">自提点</h3><form onsubmit="addPickupPoint(event)" class="form-grid"><div class="field"><label>名称</label><input name="name" placeholder="图书馆服务台" required></div><div class="field"><label>地址</label><input name="address" placeholder="图书馆一楼" required></div><div class="field span2"><label>联系人</label><input name="contact" placeholder="值班老师"></div><div class="submit-row span2"><button class="btn orange" type="submit">新增自提点</button></div></form><div style="margin-top:12px">${points.map(p => `<div class="my-item-row"><div style="flex:1"><b>${esc(p.name)}</b><small>${esc(p.address)} · ${esc(p.contact || '')}</small></div></div>`).join('') || '<div class="muted small">暂无自提点</div>'}</div></div>
+    <div class="panel" style="grid-column:1/-1"><h3 style="margin:0 0 12px;font-size:14px">学籍名单（${roster.length} 条）</h3><form onsubmit="importRoster(event)"><div class="field"><label>CSV：学号,姓名,学院,专业,年级,班级（每行一条）</label><textarea name="rows" placeholder="20230003,张三,计算机学院,软件工程,2023,软工2301" required></textarea></div><div class="submit-row"><button class="btn orange" type="submit">导入学籍</button></div></form><div style="margin-top:12px">${roster.slice(0, 20).map(r => `<div class="my-item-row"><div style="flex:1"><b>${esc(r.studentNo)} · ${esc(r.name)}</b><small>${esc(r.college)} · ${esc(r.major || '')} · ${esc(r.grade || '')}</small></div></div>`).join('') || '<div class="muted small">暂无学籍数据</div>'}</div></div>
+  </div>`;
+}
+async function addCategory(e) {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  try { await api('/api/categories', { name: String(fd.get('name') || '').trim(), sort: Number(fd.get('sort')) || 0 }); await refreshState(false); toast('分类已新增'); render(); } catch (err) { toast(err.message || '新增失败'); }
+}
+async function addPickupPoint(e) {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  try { await api('/api/admin/pickup-points', { name: String(fd.get('name') || '').trim(), address: String(fd.get('address') || '').trim(), contact: String(fd.get('contact') || '').trim() }); await refreshState(false); toast('自提点已新增'); render(); } catch (err) { toast(err.message || '新增失败'); }
+}
+async function importRoster(e) {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const rows = String(fd.get('rows') || '').split('\n').map(line => line.split(',').map(s => s.trim())).filter(r => r.length >= 3);
+  if (!rows.length) return toast('没有可导入的行');
+  const students = rows.map(r => ({ studentNo: r[0], name: r[1], college: r[2] || '', major: r[3] || '', grade: r[4] || '', className: r[5] || '' }));
+  try { await api('/api/admin/roster/import', { students }); await refreshState(false); toast(`已导入 ${students.length} 条`); render(); } catch (err) { toast(err.message || '导入失败'); }
+}
+
 /* ---------- my ---------- */
+
+function verificationPanel(user) {
+  if (user.role !== 'student') return '';
+  const pending = (db.verifications || []).find(v => v.status === 'pending');
+  const latest = (db.verifications || [])[0];
+  if (user.verified) return `<div class="panel" style="margin-top:16px"><h3 style="margin:0 0 6px;font-size:13px">学籍认证</h3><p class="small muted" style="margin:0">已认证 · ${esc(user.college || '')}。认证记录可在下方查看。</p></div>`;
+  if (pending) return `<div class="panel" style="margin-top:16px"><h3 style="margin:0 0 6px;font-size:13px">学籍认证</h3><p class="small muted" style="margin:0">申请已提交，等待运营审核：${esc(pending.studentNo)} · ${esc(pending.realName)}。</p></div>`;
+  return `<div class="panel" style="margin-top:16px">
+    <h3 style="margin:0 0 6px;font-size:13px">学籍认证</h3>
+    <p class="small muted" style="margin:0 0 10px">${latest && latest.status === 'rejected' ? `上次未通过：${esc(latest.reason || '信息不一致')}。` : '认证后才能发布、下单和置换。'}</p>
+    <form onsubmit="submitVerification(event)"><div class="form-grid"><div class="field"><label>学号</label><input name="studentNo" placeholder="20230001" required></div><div class="field"><label>姓名</label><input name="realName" placeholder="与学籍库一致" required></div></div><div class="submit-row"><button class="btn orange" type="submit">提交认证</button></div></form>
+  </div>`;
+}
+async function submitVerification(e) {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  try {
+    await api('/api/verifications', { studentNo: String(fd.get('studentNo') || '').trim(), realName: String(fd.get('realName') || '').trim() });
+    await refreshState(false);
+    toast('认证申请已提交');
+    render();
+  } catch (err) { toast(err.message || '提交失败'); }
+}
 function viewMy(user) {
   const isAdmin = user.role === 'admin';
   const myItems = db.items.filter(i => i.ownerId === user.id).sort((a, b) => b.createdAt - a.createdAt);
@@ -924,12 +1088,15 @@ function viewMy(user) {
       <button class="btn line" onclick="logout()">退出登录</button>
     </div>
   </div>
+  ${verificationPanel(user)}
+  ${!isAdmin && (db.favorites || []).length ? `<div class="section-head"><div><h2>我的收藏</h2><p>${db.favorites.length} 件</p></div></div><div class="panel" style="padding:6px 16px">${db.favorites.map(f => { const it = getItem(f.itemId); return it ? `<div class="my-item-row" onclick="openItem('${it.id}')"><div class="order-thumb" style="background:${thumbBg(it)}">${thumbChar(it)}</div><div style="flex:1"><b>${esc(it.title)}</b><small>${esc(it.category)} · ${money(it.price)}</small></div><div class="right">${itemStatusPill(it.status)}</div></div>` : ''; }).join('')}</div>` : ''}
   ${!isAdmin ? `<div class="section-head"><div><h2>我发布的</h2><p>${myItems.length} 件 · 审核通过后自动上架</p></div></div>
   <div class="panel" style="padding:6px 16px">
     ${myItems.length ? myItems.map(i => `<div class="my-item-row" onclick="openItem('${i.id}')"><div class="order-thumb" style="background:${thumbBg(i)}">${thumbChar(i)}</div><div style="flex:1"><b>${esc(i.title)}</b><small>${esc(i.category)} · ${money(i.price)} · ${fmtTime(i.createdAt)}</small></div><div class="right">${itemStatusPill(i.status)}</div></div>`).join('') : '<div class="empty" style="border:0;padding:26px 0">还没有发布过物品。<button class="btn ghost" style="margin-top:12px" onclick="go(\'publish\')">去发布</button></div>'}
   </div>` : ''}
   <div class="section-head"><div><h2>我的订单</h2><p>${myOrders.length} 笔</p></div><button class="btn line small" onclick="go('orders')">查看全部</button></div>
   <div class="panel" style="padding:6px 16px">${myOrders.length ? myOrders.slice(0, 3).map(o => { const it = getItem(o.itemId); return `<div class="my-item-row" onclick="go('orderDetail',{orderId:'${o.id}'})"><div class="order-thumb" style="background:${it ? thumbBg(it) : CAT_STYLE['教材']}">${it ? thumbChar(it) : '物'}</div><div style="flex:1"><b>${esc(it ? it.title : '物品已删除')}</b><small>${o.id} · ${money(o.amount)} · ${fmtTime(o.createdAt)}</small></div><div class="right">${statusPill(o.status)}</div></div>`; }).join('') : '<div class="empty" style="border:0;padding:26px 0">还没有订单。<button class="btn ghost" style="margin-top:12px" onclick="go(\'home\')">去逛逛</button></div>'}</div>
+  ${!isAdmin ? `<div class="section-head"><div><h2>信用流水</h2><p>最近 ${(db.creditRecords || []).length} 条</p></div></div><div class="panel" style="padding:6px 16px">${(db.creditRecords || []).length ? db.creditRecords.slice(0, 8).map(c => `<div class="my-item-row"><div class="order-thumb" style="background:linear-gradient(145deg,#7a6b9a,#493f69)">信</div><div style="flex:1"><b>${esc(c.reason)}</b><small>${fmtTime(c.createdAt)} · ${esc(c.refType || '')} ${esc(c.refId || '')}</small></div><div class="right" style="color:${c.change >= 0 ? 'var(--green)' : '#b45309'};font-weight:800">${c.change >= 0 ? '+' : ''}${c.change}</div></div>`).join('') : '<div class="empty" style="border:0;padding:20px 0">交易完成后会产生信用流水。</div>'}</div>` : ''}
   <div class="panel" style="margin-top:16px">
     <h3 style="margin:0 0 6px;font-size:13px">演示数据</h3>
     <p class="small muted" style="line-height:1.7;margin:0 0 12px">所有数据保存在 Railway 云端 MySQL 数据库 shiguangji。重置会清空发布、订单、流水、评价和审核记录，恢复初始演示状态。</p>
@@ -943,7 +1110,7 @@ async function resetDemo() {
     await api('/api/logout');
     store.removeItem(SESSION_KEY);
     currentUserId = null;
-    db = { users: [], items: [], orders: [], reviews: [], tx: [], audits: [], history: [], swaps: { intents: [], plans: [] } };
+    db = { users: [], items: [], orders: [], reviews: [], tx: [], audits: [], history: [], swaps: { intents: [], plans: [] }, categories: [], images: [], favorites: [], notifications: [], wanted: [], arbitrations: [], verifications: [], roster: [], pickupPoints: [], deliveries: [], creditRecords: [], platform: null };
     ui = { route: 'home', itemId: null, orderId: null, q: '', cat: '全部', orderTab: 'all', adminTab: 'audit', loginTab: 'login' };
     toast('MySQL 演示数据已重置');
     renderLogin();

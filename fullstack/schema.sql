@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS items (
   owner_id VARCHAR(32) NOT NULL,
   title VARCHAR(100) NOT NULL,
   category VARCHAR(20) NOT NULL,
+  category_id VARCHAR(32) NULL,
   price DECIMAL(10,2) NOT NULL,
   original_price DECIMAL(10,2) NOT NULL,
   condition_level VARCHAR(10) NOT NULL,
@@ -40,6 +41,7 @@ CREATE TABLE IF NOT EXISTS orders (
   order_type VARCHAR(16) NOT NULL DEFAULT 'normal',
   plan_id VARCHAR(32) NULL,
   delivery VARCHAR(20) NOT NULL,
+  pickup_point_id VARCHAR(32) NULL,
   created_at BIGINT NOT NULL,
   deadline BIGINT NOT NULL,
   paid_at BIGINT NULL,
@@ -145,4 +147,163 @@ CREATE TABLE IF NOT EXISTS swap_plans (
   CONSTRAINT fk_swap_plans_item_b FOREIGN KEY (item_b_id) REFERENCES items(id),
   CONSTRAINT fk_swap_plans_user_a FOREIGN KEY (user_a_id) REFERENCES users(id),
   CONSTRAINT fk_swap_plans_user_b FOREIGN KEY (user_b_id) REFERENCES users(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ===== 21 表补齐：内容、身份、交易、互动、治理 =====
+CREATE TABLE IF NOT EXISTS categories (
+  id VARCHAR(32) PRIMARY KEY,
+  name VARCHAR(40) NOT NULL,
+  parent_id VARCHAR(32) NULL,
+  sort INT NOT NULL DEFAULT 0,
+  status VARCHAR(16) NOT NULL DEFAULT 'active',
+  created_at BIGINT NOT NULL,
+  UNIQUE KEY uk_categories_name (name),
+  KEY idx_categories_parent (parent_id),
+  CONSTRAINT fk_categories_parent FOREIGN KEY (parent_id) REFERENCES categories(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS student_roster (
+  student_no VARCHAR(32) PRIMARY KEY,
+  name VARCHAR(40) NOT NULL,
+  college VARCHAR(60) NOT NULL DEFAULT '',
+  major VARCHAR(60) NOT NULL DEFAULT '',
+  grade VARCHAR(20) NOT NULL DEFAULT '',
+  class_name VARCHAR(40) NOT NULL DEFAULT '',
+  status VARCHAR(16) NOT NULL DEFAULT 'active',
+  imported_at BIGINT NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS verification_records (
+  id VARCHAR(32) PRIMARY KEY,
+  user_id VARCHAR(32) NOT NULL,
+  student_no VARCHAR(32) NOT NULL,
+  real_name VARCHAR(40) NOT NULL,
+  college VARCHAR(60) NOT NULL DEFAULT '',
+  status VARCHAR(16) NOT NULL DEFAULT 'approved',
+  reason VARCHAR(200) NOT NULL DEFAULT '',
+  reviewed_by VARCHAR(32) NULL,
+  created_at BIGINT NOT NULL,
+  reviewed_at BIGINT NULL,
+  KEY idx_verification_user (user_id, created_at),
+  CONSTRAINT fk_verification_user FOREIGN KEY (user_id) REFERENCES users(id),
+  CONSTRAINT fk_verification_roster FOREIGN KEY (student_no) REFERENCES student_roster(student_no)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS item_images (
+  id VARCHAR(32) PRIMARY KEY,
+  item_id VARCHAR(32) NOT NULL,
+  url VARCHAR(500) NOT NULL,
+  sort INT NOT NULL DEFAULT 0,
+  is_primary TINYINT NOT NULL DEFAULT 0,
+  status VARCHAR(16) NOT NULL DEFAULT 'active',
+  created_at BIGINT NOT NULL,
+  KEY idx_item_images_item (item_id, status, sort),
+  CONSTRAINT fk_item_images_item FOREIGN KEY (item_id) REFERENCES items(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS platform_accounts (
+  id VARCHAR(32) PRIMARY KEY,
+  account_type VARCHAR(20) NOT NULL,
+  escrow_balance DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+  total_in DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+  total_out DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+  updated_at BIGINT NOT NULL,
+  UNIQUE KEY uk_platform_account_type (account_type)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS pickup_points (
+  id VARCHAR(32) PRIMARY KEY,
+  name VARCHAR(60) NOT NULL,
+  address VARCHAR(160) NOT NULL,
+  contact VARCHAR(60) NOT NULL DEFAULT '',
+  status VARCHAR(16) NOT NULL DEFAULT 'active',
+  created_at BIGINT NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS delivery_records (
+  id VARCHAR(32) PRIMARY KEY,
+  order_id VARCHAR(32) NOT NULL,
+  method VARCHAR(20) NOT NULL DEFAULT 'face',
+  pickup_point_id VARCHAR(32) NULL,
+  pickup_code VARCHAR(20) NULL,
+  delivered_at BIGINT NOT NULL,
+  confirmed_at BIGINT NULL,
+  operator_id VARCHAR(32) NULL,
+  note VARCHAR(200) NOT NULL DEFAULT '',
+  UNIQUE KEY uk_delivery_order (order_id),
+  KEY idx_delivery_pickup (pickup_point_id),
+  CONSTRAINT fk_delivery_order FOREIGN KEY (order_id) REFERENCES orders(id),
+  CONSTRAINT fk_delivery_pickup FOREIGN KEY (pickup_point_id) REFERENCES pickup_points(id),
+  CONSTRAINT fk_delivery_operator FOREIGN KEY (operator_id) REFERENCES users(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS credit_records (
+  id VARCHAR(32) PRIMARY KEY,
+  user_id VARCHAR(32) NOT NULL,
+  change_value INT NOT NULL,
+  reason VARCHAR(120) NOT NULL,
+  ref_type VARCHAR(20) NULL,
+  ref_id VARCHAR(32) NULL,
+  created_at BIGINT NOT NULL,
+  KEY idx_credit_user (user_id, created_at),
+  CONSTRAINT fk_credit_user FOREIGN KEY (user_id) REFERENCES users(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS notifications (
+  id VARCHAR(32) PRIMARY KEY,
+  user_id VARCHAR(32) NOT NULL,
+  type VARCHAR(32) NOT NULL,
+  title VARCHAR(80) NOT NULL,
+  body VARCHAR(300) NOT NULL DEFAULT '',
+  read_at BIGINT NULL,
+  created_at BIGINT NOT NULL,
+  KEY idx_notifications_user (user_id, read_at, created_at),
+  CONSTRAINT fk_notifications_user FOREIGN KEY (user_id) REFERENCES users(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS favorites (
+  id VARCHAR(32) PRIMARY KEY,
+  user_id VARCHAR(32) NOT NULL,
+  item_id VARCHAR(32) NOT NULL,
+  created_at BIGINT NOT NULL,
+  UNIQUE KEY uk_favorite_user_item (user_id, item_id),
+  KEY idx_favorites_item (item_id),
+  CONSTRAINT fk_favorites_user FOREIGN KEY (user_id) REFERENCES users(id),
+  CONSTRAINT fk_favorites_item FOREIGN KEY (item_id) REFERENCES items(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS wanted_posts (
+  id VARCHAR(32) PRIMARY KEY,
+  user_id VARCHAR(32) NOT NULL,
+  title VARCHAR(100) NOT NULL,
+  category_id VARCHAR(32) NULL,
+  keywords VARCHAR(160) NOT NULL DEFAULT '',
+  budget_min DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+  budget_max DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+  condition_level VARCHAR(10) NOT NULL DEFAULT '90',
+  status VARCHAR(16) NOT NULL DEFAULT 'open',
+  created_at BIGINT NOT NULL,
+  expires_at BIGINT NULL,
+  KEY idx_wanted_status (status, created_at),
+  KEY idx_wanted_user (user_id),
+  CONSTRAINT fk_wanted_user FOREIGN KEY (user_id) REFERENCES users(id),
+  CONSTRAINT fk_wanted_category FOREIGN KEY (category_id) REFERENCES categories(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS arbitration_requests (
+  id VARCHAR(32) PRIMARY KEY,
+  order_id VARCHAR(32) NOT NULL,
+  applicant_id VARCHAR(32) NOT NULL,
+  reason VARCHAR(300) NOT NULL,
+  evidence VARCHAR(500) NOT NULL DEFAULT '',
+  status VARCHAR(16) NOT NULL DEFAULT 'pending',
+  result VARCHAR(300) NOT NULL DEFAULT '',
+  operator_id VARCHAR(32) NULL,
+  created_at BIGINT NOT NULL,
+  decided_at BIGINT NULL,
+  UNIQUE KEY uk_arbitration_order (order_id),
+  KEY idx_arbitration_status (status, created_at),
+  CONSTRAINT fk_arbitration_order FOREIGN KEY (order_id) REFERENCES orders(id),
+  CONSTRAINT fk_arbitration_applicant FOREIGN KEY (applicant_id) REFERENCES users(id),
+  CONSTRAINT fk_arbitration_operator FOREIGN KEY (operator_id) REFERENCES users(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
