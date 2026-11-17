@@ -84,6 +84,19 @@ function mapReview(r) {
 function mapAudit(r) {
   return { id: r.id, itemId: r.item_id, result: r.result, reason: r.reason, operatorId: r.operator_id, at: n(r.at) };
 }
+function mapHistory(r) {
+  return {
+    id: r.id, itemId: r.item_id, action: r.action,
+    fromStatus: r.from_status || null, toStatus: r.to_status || null,
+    actorId: r.actor_id || null, note: r.note || '', createdAt: n(r.created_at)
+  };
+}
+async function addHistory(conn, itemId, action, fromStatus, toStatus, actorId, note) {
+  await conn.query(
+    'INSERT INTO item_history (id,item_id,action,from_status,to_status,actor_id,note,created_at) VALUES (?,?,?,?,?,?,?,?)',
+    [id('h'), itemId, action, fromStatus || null, toStatus || null, actorId || null, String(note || '').slice(0, 200), Date.now()]
+  );
+}
 function mapSwapIntent(r) {
   return {
     id: r.id, userId: r.user_id, myItemId: r.my_item_id,
@@ -273,6 +286,14 @@ async function bootstrap(currentUser) {
     items.push(...extraItems);
   }
 
+  const visibleItemIds = items.map(i => i.id);
+  const historySql = isAdmin
+    ? 'SELECT * FROM item_history ORDER BY created_at ASC'
+    : visibleItemIds.length
+      ? `SELECT * FROM item_history WHERE item_id IN (${visibleItemIds.map(() => '?').join(',')}) ORDER BY created_at ASC`
+      : null;
+  const [history] = historySql ? await pool.query(historySql, isAdmin ? [] : visibleItemIds) : [[]];
+
   // 只返回当前用户及当前数据里出现过的其他用户，避免全站用户资料暴露。
   const userIds = new Set([user.id]);
   items.forEach(i => userIds.add(i.owner_id));
@@ -301,6 +322,7 @@ async function bootstrap(currentUser) {
       reviews: reviews.map(mapReview),
       tx: payments.map(mapPayment),
       audits: audits.map(mapAudit),
+      history: history.map(mapHistory),
       swaps: {
         intents: intents.map(mapSwapIntent),
         plans: plans.map(mapSwapPlan)
@@ -370,6 +392,7 @@ async function publishItem(user, body) {
     'INSERT INTO items (id,owner_id,title,category,price,original_price,condition_level,description,delivery,status,created_at,views) VALUES (?,?,?,?,?,?,?,?,?,?,?,0)',
     [itemId, user.id, title, String(body.category || '教材'), price, Number(body.originalPrice) || price, String(body.condition || '90'), String(body.description || ''), String(body.delivery || '面交/自提'), 'pending', now]
   );
+  await addHistory(pool, itemId, 'published', null, 'pending', user.id, '发布，等待审核');
   const [rows] = await pool.query('SELECT * FROM items WHERE id = ?', [itemId]);
   return mapItem(rows[0]);
 }
@@ -381,6 +404,7 @@ async function approveItem(itemId, operator) {
   if (items[0].status !== 'pending') throw httpError(409, '该物品不在待审核状态');
   await pool.query("UPDATE items SET status='on_sale' WHERE id=?", [itemId]);
   await pool.query('INSERT INTO audits (id,item_id,result,reason,operator_id,at) VALUES (?,?,?,?,?,?)', [id('a'), itemId, '通过', '', operator.id, Date.now()]);
+  await addHistory(pool, itemId, 'approved', 'pending', 'on_sale', operator.id, '审核通过，自动上架');
   const [rows] = await pool.query('SELECT * FROM items WHERE id=?', [itemId]);
   return mapItem(rows[0]);
 }
@@ -392,6 +416,7 @@ async function rejectItem(itemId, operator, reason) {
   if (items[0].status !== 'pending') throw httpError(409, '该物品不在待审核状态');
   await pool.query("UPDATE items SET status='rejected', reject_reason=? WHERE id=?", [reason || '未填写原因', itemId]);
   await pool.query('INSERT INTO audits (id,item_id,result,reason,operator_id,at) VALUES (?,?,?,?,?,?)', [id('a'), itemId, '驳回', reason || '未填写原因', operator.id, Date.now()]);
+  await addHistory(pool, itemId, 'rejected', 'pending', 'rejected', operator.id, reason || '未填写原因');
   const [rows] = await pool.query('SELECT * FROM items WHERE id=?', [itemId]);
   return mapItem(rows[0]);
 }
@@ -412,6 +437,7 @@ async function createOrder(body, buyer) {
     const now = Date.now();
     await conn.query('INSERT INTO orders (id,item_id,buyer_id,seller_id,amount,status,delivery,created_at,deadline,reviewed) VALUES (?,?,?,?,?,?,?,?,?,0)', [orderId, itemId, buyer.id, item.owner_id, item.price, 'unpaid', item.delivery, now, now + 30000]);
     await conn.query("UPDATE items SET status='locked' WHERE id=?", [itemId]);
+    await addHistory(conn, itemId, 'locked', 'on_sale', 'locked', buyer.id, '买家下单，物品锁定');
     await conn.commit();
     const [rows] = await conn.query('SELECT * FROM orders WHERE id=?', [orderId]);
     return mapOrder(rows[0]);
@@ -436,6 +462,7 @@ async function payOrder(orderId, userId) {
     if (Number(order.deadline) < Date.now()) {
       await conn.query("UPDATE orders SET status='cancelled', cancelled_at=? WHERE id=?", [Date.now(), orderId]);
       await conn.query("UPDATE items SET status='on_sale' WHERE id=? AND status='locked'", [order.item_id]);
+      await addHistory(conn, order.item_id, 'unlocked', 'locked', 'on_sale', userId, '订单超时取消，物品解锁');
       await conn.commit();
       throw httpError(409, '订单已超时取消，请重新下单');
     }
@@ -445,6 +472,7 @@ async function payOrder(orderId, userId) {
     await conn.query('UPDATE users SET balance = balance - ? WHERE id=?', [order.amount, userId]);
     await conn.query("UPDATE orders SET status='to_deliver', paid_at=? WHERE id=?", [Date.now(), orderId]);
     await conn.query('INSERT INTO payments (id,user_id,order_id,type,amount,note,at) VALUES (?,?,?,?,?,?,?)', [id('t'), userId, orderId, '支付', order.amount, '订单 ' + orderId + ' · 平台托管', Date.now()]);
+    await addHistory(conn, order.item_id, 'paid', 'locked', 'locked', userId, '支付成功，进入平台托管');
     await conn.commit();
     const [rows] = await conn.query('SELECT * FROM orders WHERE id=?', [orderId]);
     return mapOrder(rows[0]);
@@ -468,6 +496,7 @@ async function cancelOrder(orderId, userId) {
     if (order.status !== 'unpaid') throw httpError(409, '订单状态不允许取消');
     await conn.query("UPDATE orders SET status='cancelled', cancelled_at=? WHERE id=?", [Date.now(), orderId]);
     await conn.query("UPDATE items SET status='on_sale' WHERE id=? AND status='locked'", [order.item_id]);
+    await addHistory(conn, order.item_id, 'unlocked', 'locked', 'on_sale', userId, '买家取消订单，物品解锁');
     await conn.commit();
     const [rows] = await conn.query('SELECT * FROM orders WHERE id=?', [orderId]);
     return mapOrder(rows[0]);
@@ -487,6 +516,7 @@ async function deliverOrder(orderId, userId) {
   if (order.seller_id !== userId) throw httpError(403, '只有卖家可以确认交付');
   if (order.status !== 'to_deliver') throw httpError(409, '订单状态不允许交付');
   await pool.query("UPDATE orders SET status='to_confirm', delivered_at=? WHERE id=?", [Date.now(), orderId]);
+  await addHistory(pool, order.item_id, 'delivered', 'locked', 'locked', userId, '卖家确认交付，等待买家确认');
   const [rows] = await pool.query('SELECT * FROM orders WHERE id=?', [orderId]);
   return mapOrder(rows[0]);
 }
@@ -506,6 +536,7 @@ async function confirmOrder(orderId, userId) {
     await conn.query('UPDATE users SET balance = balance + ?, credit = LEAST(100, credit + 2) WHERE id=?', [order.amount, order.seller_id]);
     await conn.query('UPDATE users SET credit = LEAST(100, credit + 2) WHERE id=?', [order.buyer_id]);
     await conn.query('INSERT INTO payments (id,user_id,order_id,type,amount,note,at) VALUES (?,?,?,?,?,?,?)', [id('t'), order.seller_id, orderId, '放款', order.amount, '订单 ' + orderId + ' · 托管放款', Date.now()]);
+    await addHistory(conn, order.item_id, 'completed', 'locked', 'completed', userId, '买家确认收货，交易完成');
     await conn.commit();
     const [rows] = await conn.query('SELECT * FROM orders WHERE id=?', [orderId]);
     return mapOrder(rows[0]);
@@ -554,6 +585,8 @@ async function cancelSwapPlanTx(conn, plan) {
     "UPDATE swap_intents SET status='cancelled' WHERE id IN (?,?) AND status IN ('active','matched')",
     [plan.intent_a_id, plan.intent_b_id]
   );
+  await addHistory(conn, plan.item_a_id, 'swap_cancelled', 'locked', 'on_sale', null, '置换方案取消，物品解锁');
+  await addHistory(conn, plan.item_b_id, 'swap_cancelled', 'locked', 'on_sale', null, '置换方案取消，物品解锁');
 }
 
 async function expireSwapPlans() {
@@ -645,6 +678,8 @@ async function createSwapIntent(user, body) {
         [planId, first.id, second.id, first.my_item_id, second.my_item_id, first.user_id, second.user_id, 'pending', now, now + 10 * 60 * 1000]
       );
       const [planRows] = await conn.query('SELECT * FROM swap_plans WHERE id=?', [planId]);
+      await addHistory(conn, first.my_item_id, 'swap_locked', 'on_sale', 'locked', first.user_id, '置换匹配，物品锁定');
+      await addHistory(conn, second.my_item_id, 'swap_locked', 'on_sale', 'locked', second.user_id, '置换匹配，物品锁定');
       await conn.commit();
       return { intent: { id: first.id, userId: first.user_id, myItemId: first.my_item_id, targetItemId: first.target_item_id, status: 'matched', createdAt: now }, plan: mapSwapPlan(planRows[0]) };
     }
@@ -796,6 +831,8 @@ async function completeSwapPlan(planId, userId) {
     if (orderUpdate.affectedRows < 2) throw httpError(409, '置换单状态异常，无法完成');
     await conn.query("UPDATE swap_plans SET status='completed', completed_at=? WHERE id=?", [now, planId]);
     await conn.query("UPDATE swap_intents SET status='completed' WHERE id IN (?,?)", [plan.intent_a_id, plan.intent_b_id]);
+    await addHistory(conn, plan.item_a_id, 'swap_completed', 'locked', 'completed', userId, '置换完成，归属转给对方');
+    await addHistory(conn, plan.item_b_id, 'swap_completed', 'locked', 'completed', userId, '置换完成，归属转给对方');
     await conn.commit();
     plan.status = 'completed';
     plan.completed_at = now;
@@ -815,6 +852,7 @@ async function resetData() {
     await conn.query('DELETE FROM reviews');
     await conn.query('DELETE FROM payments');
     await conn.query('DELETE FROM audits');
+    await conn.query('DELETE FROM item_history');
     await conn.query('DELETE FROM orders');
     await conn.query('DELETE FROM swap_plans');
     await conn.query('DELETE FROM swap_intents');
@@ -846,6 +884,7 @@ async function syncState(snapshot) {
     await conn.query('DELETE FROM reviews');
     await conn.query('DELETE FROM payments');
     await conn.query('DELETE FROM audits');
+    await conn.query('DELETE FROM item_history');
     await conn.query('DELETE FROM orders');
     await conn.query('DELETE FROM swap_plans');
     await conn.query('DELETE FROM swap_intents');

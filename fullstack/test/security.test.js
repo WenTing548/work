@@ -31,7 +31,7 @@ async function resetDb() {
   const conn = await mysql.createConnection(DB);
   try {
     await conn.query('SET FOREIGN_KEY_CHECKS=0');
-    await conn.query('DROP TABLE IF EXISTS swap_plans, swap_intents, audits, reviews, payments, orders, items, users');
+    await conn.query('DROP TABLE IF EXISTS item_history, swap_plans, swap_intents, audits, reviews, payments, orders, items, users');
     await conn.query('SET FOREIGN_KEY_CHECKS=1');
   } finally {
     await conn.end();
@@ -184,6 +184,8 @@ test('P0-4 鉴权、数据范围和核心交易闭环', async t => {
     assert.equal(result.data.order.buyerId, 'u1');
     assert.equal(result.data.order.sellerId, 'u2');
     assert.equal(result.data.order.status, 'unpaid');
+    const afterCreate = await request('/api/bootstrap', { cookie: student1Cookie });
+    assert.ok(afterCreate.data.db.history.some(h => h.itemId === 'i1' && h.action === 'locked'));
   });
 
   await t.test('student2 能看到自己作为卖家的订单，但看不到别人的待审核物品', async () => {
@@ -263,6 +265,10 @@ test('P0-4 鉴权、数据范围和核心交易闭环', async t => {
     ));
     assert.equal(finalState.data.db.reviews.length, 1);
     assert.equal(finalState.data.db.reviews[0].orderId, orderId);
+    const actions = finalState.data.db.history.filter(h => h.itemId === 'i1').map(h => h.action);
+    assert.ok(actions.includes('locked'));
+    assert.ok(actions.includes('paid'));
+    assert.ok(actions.includes('completed'));
   });
 
   await t.test('普通学生不能审核，管理员可以审核', async () => {
@@ -279,6 +285,8 @@ test('P0-4 鉴权、数据范围和核心交易闭环', async t => {
     });
     assert.equal(approved.status, 200);
     assert.equal(approved.data.item.status, 'on_sale');
+    const approvedState = await request('/api/bootstrap', { cookie: adminCookie });
+    assert.ok(approvedState.data.db.history.some(h => h.itemId === 'i5' && h.action === 'approved'));
   });
 
   await t.test('管理员能看到全量数据，sync 默认关闭', async () => {

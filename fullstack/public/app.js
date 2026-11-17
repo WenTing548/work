@@ -33,8 +33,14 @@ const CAT_STYLE = {
 };
 const CAT_SHORT = { '教材': '书', '数码': '机', '出行': '车', '生活': '灯', '乐器': '琴' };
 const CONDITION_LABEL = { 'new': '全新', '90': '九成新', '70': '七成新', '50': '五成新' };
+const HISTORY_LABEL = {
+  published: '发布', approved: '审核通过', rejected: '审核驳回',
+  locked: '下单锁定', paid: '支付托管', unlocked: '取消解锁',
+  delivered: '卖家交付', completed: '交易完成',
+  swap_locked: '置换锁定', swap_cancelled: '置换取消', swap_completed: '置换完成'
+};
 
-let db = { users: [], items: [], orders: [], reviews: [], tx: [], audits: [], swaps: { intents: [], plans: [] } };
+let db = { users: [], items: [], orders: [], reviews: [], tx: [], audits: [], history: [], swaps: { intents: [], plans: [] } };
 let currentUserId = store.getItem(SESSION_KEY) || null;
 let countdownTimer = null;
 let reviewRating = 5;
@@ -124,13 +130,14 @@ async function refreshState(renderAfter = true) {
   if (res.status === 401) {
     currentUserId = null;
     store.removeItem(SESSION_KEY);
-    db = { users: [], items: [], orders: [], reviews: [], tx: [], audits: [], swaps: { intents: [], plans: [] } };
+    db = { users: [], items: [], orders: [], reviews: [], tx: [], audits: [], history: [], swaps: { intents: [], plans: [] } };
     if (renderAfter) renderLogin();
     return null;
   }
   if (!res.ok) throw new Error('后端返回 ' + res.status);
   const data = await res.json();
   db = data.db;
+  db.history = db.history || [];
   db.swaps = db.swaps || { intents: [], plans: [] };
   if (data.user) {
     currentUserId = data.user.id;
@@ -346,7 +353,7 @@ async function logout() {
   try { await api('/api/logout'); } catch (e) { /* 本地仍然清状态 */ }
   currentUserId = null;
   store.removeItem(SESSION_KEY);
-  db = { users: [], items: [], orders: [], reviews: [], tx: [], audits: [], swaps: { intents: [], plans: [] } };
+  db = { users: [], items: [], orders: [], reviews: [], tx: [], audits: [], history: [], swaps: { intents: [], plans: [] } };
   ui = { route: 'home', itemId: null, orderId: null, q: '', cat: '全部', orderTab: 'all', adminTab: 'audit', loginTab: 'login' };
   renderLogin();
 }
@@ -430,11 +437,17 @@ function viewDetail(user) {
   if (isOwner) { buyLabel = '这是你发布的物品'; disabled = true; }
   else if (user.role === 'admin') { buyLabel = '运营账号不能购买'; disabled = true; }
   else if (item.status !== 'on_sale') { buyLabel = itemStatusText(item.status); disabled = true; }
-  const history = [
-    ['建档', fmtTime(item.createdAt)],
-    ['上架', fmtTime(item.createdAt)],
-    item.status === 'completed' ? ['成交', '已完成交易'] : ['当前', itemStatusText(item.status)]
-  ];
+  const records = (db.history || []).filter(h => h.itemId === item.id);
+  const history = records.length
+    ? records.map(h => [
+        HISTORY_LABEL[h.action] || h.action,
+        `${fmtTime(h.createdAt)}${h.note ? ' · ' + h.note : ''}`
+      ])
+    : [
+        ['建档', fmtTime(item.createdAt)],
+        ['上架', fmtTime(item.createdAt)],
+        item.status === 'completed' ? ['成交', '已完成交易'] : ['当前', itemStatusText(item.status)]
+      ];
   return `<button class="back" onclick="go('home')">‹ 返回</button>
   <div class="detail-layout">
     <div class="detail-visual" style="background:${thumbBg(item)}">
@@ -930,7 +943,7 @@ async function resetDemo() {
     await api('/api/logout');
     store.removeItem(SESSION_KEY);
     currentUserId = null;
-    db = { users: [], items: [], orders: [], reviews: [], tx: [], audits: [], swaps: { intents: [], plans: [] } };
+    db = { users: [], items: [], orders: [], reviews: [], tx: [], audits: [], history: [], swaps: { intents: [], plans: [] } };
     ui = { route: 'home', itemId: null, orderId: null, q: '', cat: '全部', orderTab: 'all', adminTab: 'audit', loginTab: 'login' };
     toast('MySQL 演示数据已重置');
     renderLogin();

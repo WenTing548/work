@@ -145,7 +145,7 @@ USE railway;
 
 然后把 `fullstack/schema.sql` 的全部内容粘贴到下面，执行。
 
-成功后刷新，应该有 6 张表：
+成功后刷新，应该有 9 张表：
 
 ```text
 users
@@ -154,6 +154,9 @@ orders
 payments
 reviews
 audits
+item_history
+swap_intents
+swap_plans
 ```
 
 ### 7. 给 work 配数据库变量

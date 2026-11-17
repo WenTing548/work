@@ -91,6 +91,20 @@ CREATE TABLE IF NOT EXISTS audits (
   CONSTRAINT fk_audits_operator FOREIGN KEY (operator_id) REFERENCES users(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- 物品履历：只追加不覆盖，详情页按时间正序展示。
+CREATE TABLE IF NOT EXISTS item_history (
+  id VARCHAR(32) PRIMARY KEY,
+  item_id VARCHAR(32) NOT NULL,
+  action VARCHAR(32) NOT NULL,
+  from_status VARCHAR(20) NULL,
+  to_status VARCHAR(20) NULL,
+  actor_id VARCHAR(32) NULL,
+  note VARCHAR(200) NOT NULL DEFAULT '',
+  created_at BIGINT NOT NULL,
+  KEY idx_item_history_item_time (item_id, created_at),
+  CONSTRAINT fk_item_history_item FOREIGN KEY (item_id) REFERENCES items(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- 两人置换：意向只表达“我的某件物品想换对方的某件物品”；
 -- 双方意向互相指向时才生成方案，方案确认后生成两张 0 元置换单。
 CREATE TABLE IF NOT EXISTS swap_intents (
