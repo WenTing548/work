@@ -130,6 +130,43 @@ node server.js --open
 
 ## 8. 测试
 
+### 8.1 自动化安全测试
+
+测试使用独立的 `shiguangji_test` 数据库和 3111 端口，不会读写 `shiguangji` 生产库。
+
+一次性建库授权（用 MySQL 管理员执行）：
+
+```sql
+CREATE DATABASE IF NOT EXISTS shiguangji_test
+  DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+GRANT ALL PRIVILEGES ON shiguangji_test.* TO 'shiguang'@'localhost';
+FLUSH PRIVILEGES;
+```
+
+运行：
+
+```bash
+cd fullstack
+npm test
+```
+
+覆盖用例：
+
+1. 未登录访问 `/api/bootstrap` 返回 401；
+2. student1 能看自己的 `username`/`balance`，其他用户只有公开摘要；
+3. student1 创建的订单归属正确；
+4. student2 只看到自己作为卖家的订单，看不到别人的待审核物品；
+5. student3 看不到别人的订单，代付返回 403；
+6. 支付、交付、确认、评价的完整闭环；
+7. 普通学生审核返回 403，管理员审核成功；
+8. 管理员能看全量，`/api/sync` 默认 404；
+9. 普通学生 `/api/reset` 返回 403；
+10. 退出后 Cookie 失效。
+
+详细说明见 [`TESTING.md`](TESTING.md)。
+
+### 8.2 手工走查
+
 已用无头 Edge + CDP 实测通过：
 
 1. `student1` 登录；
@@ -138,8 +175,6 @@ node server.js --open
 4. 切换 `student2` 确认交付；
 5. 切回 `student1` 确认收货；
 6. MySQL 中订单状态为 `completed`，物品状态为 `completed`。
-
-测试脚本 `test-flow.js` 仅用于开发验证，交付版可以删除。
 
 ## 9. 已知边界（请如实说明）
 

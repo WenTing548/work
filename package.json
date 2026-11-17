@@ -4,7 +4,8 @@
   "private": true,
   "description": "拾光集校园二手交易平台 - Railway 根目录启动入口",
   "scripts": {
-    "start": "node fullstack/server.js"
+    "start": "node fullstack/server.js",
+    "test": "node --test fullstack/test/security.test.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
