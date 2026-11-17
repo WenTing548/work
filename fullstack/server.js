@@ -5,7 +5,7 @@ const { URL } = require('url');
 const { exec } = require('child_process');
 const mysql = require('mysql2/promise');
 
-const PORT = Number(process.env.PORT || 3000);
+const BASE_PORT = Number(process.env.PORT || 3000);
 const DB_CONFIG = {
   host: process.env.DB_HOST || '127.0.0.1',
   port: Number(process.env.DB_PORT || 3306),
@@ -516,13 +516,26 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-init().then(() => {
-  server.listen(PORT, '127.0.0.1', () => {
-    console.log(`拾光集 MySQL 后端已启动：http://127.0.0.1:${PORT}`);
+function listenWithFallback(port, attempt = 0) {
+  server.listen(port, '127.0.0.1', () => {
+    console.log(`拾光集 MySQL 后端已启动：http://127.0.0.1:${port}`);
     if (process.argv.includes('--open') && process.platform === 'win32') {
-      exec(`start "" http://127.0.0.1:${PORT}`);
+      exec(`start "" http://127.0.0.1:${port}`);
     }
   });
+  server.once('error', (err) => {
+    if (err.code === 'EADDRINUSE' && attempt < 10) {
+      console.warn(`端口 ${port} 已被占用，尝试 ${port + 1} ...`);
+      setTimeout(() => listenWithFallback(port + 1, attempt + 1), 120);
+    } else {
+      console.error('服务启动失败：', err.message);
+      process.exit(1);
+    }
+  });
+}
+
+init().then(() => {
+  listenWithFallback(BASE_PORT);
 }).catch((e) => {
   console.error('启动失败：', e.message);
   console.error('请确认 MySQL80 已启动，并已创建 shiguangji 数据库和 shiguang 用户。');
