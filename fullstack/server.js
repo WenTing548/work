@@ -13,6 +13,7 @@ const DB_CONFIG = {
   password: process.env.DB_PASSWORD || 'shiguang123',
   database: process.env.DB_NAME || 'shiguangji',
   charset: 'utf8mb4',
+  ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
   waitForConnections: true,
   connectionLimit: 10,
   multipleStatements: true
@@ -517,7 +518,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 function listenWithFallback(port, attempt = 0) {
-  server.listen(port, '127.0.0.1', () => {
+  server.listen(port, '0.0.0.0', () => {
     console.log(`拾光集 MySQL 后端已启动：http://127.0.0.1:${port}`);
     if (process.argv.includes('--open') && process.platform === 'win32') {
       exec(`start "" http://127.0.0.1:${port}`);

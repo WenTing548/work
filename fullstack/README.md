@@ -148,6 +148,19 @@ node server.js --open
 - 6 张核心表可跑通交易闭环，但不是报告里 21 张表的全部落地。
 - 需要本机 MySQL 服务运行；换机器需重新建库/改配置。
 
-## 10. 与报告的关系
+## 10. 部署
+
+GitHub Pages 只能托管静态页面，不能运行本项目的 Node.js + MySQL。全栈版需要部署到 Render、Railway 等支持 Node 的平台，并连接外部 MySQL。
+
+完整步骤见 [`DEPLOY.md`](DEPLOY.md)，包括：
+
+- GitHub Pages 部署纯前端 `app/`；
+- Render + Aiven MySQL 部署全栈版；
+- Railway 同时部署 Node 和 MySQL；
+- GitHub Codespaces 临时演示。
+
+`server.js` 已支持云平台的 `PORT`、`DB_HOST`、`DB_PORT`、`DB_USER`、`DB_PASSWORD`、`DB_NAME`、`DB_SSL` 环境变量，并监听 `0.0.0.0`。
+
+## 11. 与报告的关系
 
 报告第 5—8 章描述的是“设计 + 关键模块实现方案 + 原型 + 测试方案”；本目录是**可运行实现**，用于答辩演示。报告中的 21 张表、F1—F14 流程是完整设计范围，本演示版只落地核心交易闭环，不把未实现部分写成已完成。

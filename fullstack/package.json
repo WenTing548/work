@@ -5,7 +5,7 @@
   "description": "拾光集校园二手交易平台 - Node.js + MySQL 全栈演示版",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js --open"
+    "start": "node server.js"
   },
   "dependencies": {
     "mysql2": "^3.11.5"
