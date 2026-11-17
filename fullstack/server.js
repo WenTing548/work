@@ -67,7 +67,9 @@ function mapItem(r) {
 function mapOrder(r) {
   return {
     id: r.id, itemId: r.item_id, buyerId: r.buyer_id, sellerId: r.seller_id,
-    amount: Number(r.amount), status: r.status, delivery: r.delivery,
+    amount: Number(r.amount), status: r.status,
+    orderType: r.order_type || 'normal', planId: r.plan_id || null,
+    delivery: r.delivery,
     createdAt: n(r.created_at), deadline: n(r.deadline), paidAt: n(r.paid_at),
     deliveredAt: n(r.delivered_at), completedAt: n(r.completed_at),
     cancelledAt: n(r.cancelled_at), reviewed: !!r.reviewed
@@ -81,6 +83,23 @@ function mapReview(r) {
 }
 function mapAudit(r) {
   return { id: r.id, itemId: r.item_id, result: r.result, reason: r.reason, operatorId: r.operator_id, at: n(r.at) };
+}
+function mapSwapIntent(r) {
+  return {
+    id: r.id, userId: r.user_id, myItemId: r.my_item_id,
+    targetItemId: r.target_item_id, status: r.status, createdAt: n(r.created_at)
+  };
+}
+function mapSwapPlan(r) {
+  return {
+    id: r.id, intentAId: r.intent_a_id, intentBId: r.intent_b_id,
+    itemAId: r.item_a_id, itemBId: r.item_b_id,
+    userAId: r.user_a_id, userBId: r.user_b_id,
+    status: r.status, createdAt: n(r.created_at),
+    confirmDeadline: n(r.confirm_deadline),
+    aConfirmedAt: n(r.a_confirmed_at), bConfirmedAt: n(r.b_confirmed_at),
+    completedAt: n(r.completed_at), cancelledAt: n(r.cancelled_at)
+  };
 }
 
 const SESSION_COOKIE = 'sg_token';
@@ -137,9 +156,24 @@ function requireAdmin(user) {
   return user;
 }
 
+async function ensureColumn(table, column, definition) {
+  const [rows] = await pool.query(
+    `SELECT 1 FROM information_schema.columns
+     WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?`,
+    [table, column]
+  );
+  if (!rows.length) {
+    await pool.query(`ALTER TABLE \`${table}\` ADD COLUMN \`${column}\` ${definition}`);
+    console.log(`[migrate] ${table}.${column} 已添加`);
+  }
+}
+
 async function init() {
   const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
   await pool.query(schema);
+  // 兼容已有 6 表数据库：orders 新增置换单标记；新库则由 schema.sql 直接建列。
+  await ensureColumn('orders', 'order_type', "VARCHAR(16) NOT NULL DEFAULT 'normal'");
+  await ensureColumn('orders', 'plan_id', 'VARCHAR(32) NULL');
   const [[row]] = await pool.query('SELECT COUNT(*) AS c FROM users');
   if (Number(row.c) === 0) await seed();
 }
@@ -179,6 +213,9 @@ async function bootstrap(currentUser) {
   const isAdmin = currentUser.role === 'admin';
   const user = currentUser;
 
+  // 过期的置换方案先按规则取消并解锁物品，避免首页长期看到 locked。
+  await expireSwapPlans();
+
   // 学生只拿到公开在售物品、自己的物品、自己参与的订单及其资金流水。
   const itemSql = isAdmin
     ? 'SELECT * FROM items ORDER BY created_at DESC'
@@ -207,20 +244,42 @@ async function bootstrap(currentUser) {
     ? 'SELECT * FROM audits ORDER BY at DESC'
     : 'SELECT * FROM audits WHERE item_id IN (SELECT id FROM items WHERE owner_id = ?) ORDER BY at DESC';
   const auditArgs = isAdmin ? [] : [user.id];
+  const swapIntentSql = isAdmin
+    ? 'SELECT * FROM swap_intents ORDER BY created_at DESC'
+    : 'SELECT * FROM swap_intents WHERE user_id = ? ORDER BY created_at DESC';
+  const swapIntentArgs = isAdmin ? [] : [user.id];
+  const swapPlanSql = isAdmin
+    ? 'SELECT * FROM swap_plans ORDER BY created_at DESC'
+    : 'SELECT * FROM swap_plans WHERE user_a_id = ? OR user_b_id = ? ORDER BY created_at DESC';
+  const swapPlanArgs = isAdmin ? [] : [user.id, user.id];
 
-  const [[items], [orders], [payments], [reviews], [audits]] = await Promise.all([
+  const [[items], [orders], [payments], [reviews], [audits], [intents], [plans]] = await Promise.all([
     pool.query(itemSql, itemArgs),
     pool.query(orderSql, orderArgs),
     pool.query(paymentSql, paymentArgs),
     pool.query(reviewSql, reviewArgs),
-    pool.query(auditSql, auditArgs)
+    pool.query(auditSql, auditArgs),
+    pool.query(swapIntentSql, swapIntentArgs),
+    pool.query(swapPlanSql, swapPlanArgs)
   ]);
+
+  // 方案涉及的物品处于 locked，不在“在售/自己的/订单”范围内，单独补进来。
+  const knownItemIds = new Set(items.map(i => i.id));
+  const planItemIds = [...new Set(plans.flatMap(p => [p.item_a_id, p.item_b_id]))]
+    .filter(id => !knownItemIds.has(id));
+  if (planItemIds.length) {
+    const marks = planItemIds.map(() => '?').join(',');
+    const [extraItems] = await pool.query(`SELECT * FROM items WHERE id IN (${marks})`, planItemIds);
+    items.push(...extraItems);
+  }
 
   // 只返回当前用户及当前数据里出现过的其他用户，避免全站用户资料暴露。
   const userIds = new Set([user.id]);
   items.forEach(i => userIds.add(i.owner_id));
   orders.forEach(o => { userIds.add(o.buyer_id); userIds.add(o.seller_id); });
   reviews.forEach(r => { userIds.add(r.buyer_id); userIds.add(r.seller_id); });
+  intents.forEach(i => userIds.add(i.user_id));
+  plans.forEach(p => { userIds.add(p.user_a_id); userIds.add(p.user_b_id); });
   const userIdList = [...userIds];
   const placeholders = userIdList.map(() => '?').join(',');
   const [userRows] = await pool.query(
@@ -242,6 +301,10 @@ async function bootstrap(currentUser) {
       reviews: reviews.map(mapReview),
       tx: payments.map(mapPayment),
       audits: audits.map(mapAudit),
+      swaps: {
+        intents: intents.map(mapSwapIntent),
+        plans: plans.map(mapSwapPlan)
+      },
       stats: {
         studentCount: Number(studentCountRow.c),
         onSaleCount: Number(onSaleCountRow.c)
@@ -367,6 +430,7 @@ async function payOrder(orderId, userId) {
     const [orders] = await conn.query('SELECT * FROM orders WHERE id=? FOR UPDATE', [orderId]);
     const order = orders[0];
     if (!order) throw httpError(404, '订单不存在');
+    if (order.order_type === 'swap') throw httpError(409, '置换单请在“置换”页面处理');
     if (order.buyer_id !== userId) throw httpError(403, '无权支付该订单');
     if (order.status !== 'unpaid') throw httpError(409, '订单状态不允许支付');
     if (Number(order.deadline) < Date.now()) {
@@ -399,6 +463,7 @@ async function cancelOrder(orderId, userId) {
     const [orders] = await conn.query('SELECT * FROM orders WHERE id=? FOR UPDATE', [orderId]);
     const order = orders[0];
     if (!order) throw httpError(404, '订单不存在');
+    if (order.order_type === 'swap') throw httpError(409, '置换单请在“置换”页面处理');
     if (order.buyer_id !== userId) throw httpError(403, '无权取消该订单');
     if (order.status !== 'unpaid') throw httpError(409, '订单状态不允许取消');
     await conn.query("UPDATE orders SET status='cancelled', cancelled_at=? WHERE id=?", [Date.now(), orderId]);
@@ -418,6 +483,7 @@ async function deliverOrder(orderId, userId) {
   const [orders] = await pool.query('SELECT * FROM orders WHERE id=?', [orderId]);
   const order = orders[0];
   if (!order) throw httpError(404, '订单不存在');
+  if (order.order_type === 'swap') throw httpError(409, '置换单请在“置换”页面处理');
   if (order.seller_id !== userId) throw httpError(403, '只有卖家可以确认交付');
   if (order.status !== 'to_deliver') throw httpError(409, '订单状态不允许交付');
   await pool.query("UPDATE orders SET status='to_confirm', delivered_at=? WHERE id=?", [Date.now(), orderId]);
@@ -432,6 +498,7 @@ async function confirmOrder(orderId, userId) {
     const [orders] = await conn.query('SELECT * FROM orders WHERE id=? FOR UPDATE', [orderId]);
     const order = orders[0];
     if (!order) throw httpError(404, '订单不存在');
+    if (order.order_type === 'swap') throw httpError(409, '置换单请在“置换”页面处理');
     if (order.buyer_id !== userId) throw httpError(403, '只有买家可以确认收货');
     if (order.status !== 'to_confirm') throw httpError(409, '订单状态不允许确认');
     await conn.query("UPDATE orders SET status='completed', completed_at=? WHERE id=?", [Date.now(), orderId]);
@@ -473,6 +540,274 @@ async function recharge(user) {
   return mapUser(rows[0]);
 }
 
+async function cancelSwapPlanTx(conn, plan) {
+  const now = Date.now();
+  await conn.query(
+    "UPDATE swap_plans SET status='cancelled', cancelled_at=? WHERE id=? AND status='pending'",
+    [now, plan.id]
+  );
+  await conn.query(
+    "UPDATE items SET status='on_sale' WHERE id IN (?,?) AND status='locked'",
+    [plan.item_a_id, plan.item_b_id]
+  );
+  await conn.query(
+    "UPDATE swap_intents SET status='cancelled' WHERE id IN (?,?) AND status IN ('active','matched')",
+    [plan.intent_a_id, plan.intent_b_id]
+  );
+}
+
+async function expireSwapPlans() {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [plans] = await conn.query(
+      "SELECT * FROM swap_plans WHERE status='pending' AND confirm_deadline < ? FOR UPDATE",
+      [Date.now()]
+    );
+    for (const plan of plans) await cancelSwapPlanTx(conn, plan);
+    await conn.commit();
+  } catch (e) {
+    await conn.rollback();
+    throw e;
+  } finally {
+    conn.release();
+  }
+}
+
+async function createSwapIntent(user, body) {
+  if (user.role !== 'student') throw httpError(403, '运营账号不能发起置换');
+  const myItemId = String(body.myItemId || '');
+  const targetItemId = String(body.targetItemId || '');
+  if (!myItemId || !targetItemId) throw httpError(400, '请选择双方物品');
+  if (myItemId === targetItemId) throw httpError(400, '不能和自己的物品置换');
+
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    // 固定按 id 排序加锁，两个用户同时互相发起时不会以相反顺序死锁。
+    const [locked] = await conn.query(
+      'SELECT * FROM items WHERE id IN (?,?) ORDER BY id FOR UPDATE',
+      [myItemId, targetItemId]
+    );
+    const byId = new Map(locked.map(i => [i.id, i]));
+    const myItem = byId.get(myItemId);
+    const targetItem = byId.get(targetItemId);
+    if (!myItem || !targetItem) throw httpError(404, '物品不存在');
+    if (myItem.owner_id !== user.id) throw httpError(403, '只能用自己的物品发起置换');
+    if (targetItem.owner_id === user.id) throw httpError(400, '不能换自己的物品');
+    if (myItem.status !== 'on_sale' || targetItem.status !== 'on_sale') {
+      throw httpError(409, '只有双方物品都在售时才能发起置换');
+    }
+    const [busy] = await conn.query(
+      "SELECT * FROM swap_intents WHERE my_item_id=? AND status IN ('active','matched') LIMIT 1 FOR UPDATE",
+      [myItemId]
+    );
+    if (busy[0]) throw httpError(409, '这件物品已经有进行中的置换意向');
+
+    const intentId = id('si');
+    const now = Date.now();
+    await conn.query(
+      'INSERT INTO swap_intents (id,user_id,my_item_id,target_item_id,status,created_at) VALUES (?,?,?,?,?,?)',
+      [intentId, user.id, myItemId, targetItemId, 'active', now]
+    );
+    // 对方是否已经发出“用 targetItem 换 myItem”的反向意向。
+    const [reverse] = await conn.query(
+      `SELECT * FROM swap_intents
+       WHERE user_id=? AND my_item_id=? AND target_item_id=? AND status='active'
+       ORDER BY created_at ASC LIMIT 1 FOR UPDATE`,
+      [targetItem.owner_id, targetItemId, myItemId]
+    );
+    if (reverse[0]) {
+      const a = reverse[0].id < intentId ? reverse[0] : null;
+      const b = a ? { id: intentId, user_id: user.id, my_item_id: myItemId, target_item_id: targetItemId } : reverse[0];
+      const first = a || { id: intentId, user_id: user.id, my_item_id: myItemId, target_item_id: targetItemId };
+      const second = a ? b : { id: reverse[0].id, user_id: reverse[0].user_id, my_item_id: reverse[0].my_item_id, target_item_id: reverse[0].target_item_id };
+      const planId = id('sp');
+      await conn.query(
+        "UPDATE swap_intents SET status='matched' WHERE id IN (?,?)",
+        [first.id, second.id]
+      );
+      const [lockedA] = await conn.query(
+        "UPDATE items SET status='locked' WHERE id=? AND status='on_sale'",
+        [first.my_item_id]
+      );
+      const [lockedB] = await conn.query(
+        "UPDATE items SET status='locked' WHERE id=? AND status='on_sale'",
+        [second.my_item_id]
+      );
+      if (lockedA.affectedRows !== 1 || lockedB.affectedRows !== 1) {
+        throw httpError(409, '物品状态已变化，请刷新后重试');
+      }
+      await conn.query(
+        `INSERT INTO swap_plans
+         (id,intent_a_id,intent_b_id,item_a_id,item_b_id,user_a_id,user_b_id,status,created_at,confirm_deadline)
+         VALUES (?,?,?,?,?,?,?,?,?,?)`,
+        [planId, first.id, second.id, first.my_item_id, second.my_item_id, first.user_id, second.user_id, 'pending', now, now + 10 * 60 * 1000]
+      );
+      const [planRows] = await conn.query('SELECT * FROM swap_plans WHERE id=?', [planId]);
+      await conn.commit();
+      return { intent: { id: first.id, userId: first.user_id, myItemId: first.my_item_id, targetItemId: first.target_item_id, status: 'matched', createdAt: now }, plan: mapSwapPlan(planRows[0]) };
+    }
+    await conn.commit();
+    return { intent: mapSwapIntent({ id: intentId, user_id: user.id, my_item_id: myItemId, target_item_id: targetItemId, status: 'active', created_at: now }) };
+  } catch (e) {
+    await conn.rollback();
+    throw e;
+  } finally {
+    conn.release();
+  }
+}
+
+async function cancelSwapIntent(intentId, userId) {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [rows] = await conn.query('SELECT * FROM swap_intents WHERE id=? FOR UPDATE', [intentId]);
+    const intent = rows[0];
+    if (!intent) throw httpError(404, '置换意向不存在');
+    if (intent.user_id !== userId) throw httpError(403, '无权取消该意向');
+    if (intent.status !== 'active') throw httpError(409, '该意向已匹配或已结束');
+    await conn.query("UPDATE swap_intents SET status='cancelled' WHERE id=?", [intentId]);
+    await conn.commit();
+    return { ok: true };
+  } catch (e) {
+    await conn.rollback();
+    throw e;
+  } finally {
+    conn.release();
+  }
+}
+
+async function confirmSwapPlan(planId, userId) {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [rows] = await conn.query('SELECT * FROM swap_plans WHERE id=? FOR UPDATE', [planId]);
+    const plan = rows[0];
+    if (!plan) throw httpError(404, '置换方案不存在');
+    if (plan.user_a_id !== userId && plan.user_b_id !== userId) throw httpError(403, '无权确认该方案');
+    if (plan.status === 'completed' || plan.status === 'cancelled') throw httpError(409, '该方案已结束');
+    if (plan.status === 'active') {
+      await conn.commit();
+      return mapSwapPlan(plan);
+    }
+    if (Number(plan.confirm_deadline) < Date.now()) {
+      await cancelSwapPlanTx(conn, plan);
+      await conn.commit();
+      throw httpError(409, '方案已超时取消，物品已解锁');
+    }
+    const now = Date.now();
+    const isA = plan.user_a_id === userId;
+    if (isA && !plan.a_confirmed_at) {
+      plan.a_confirmed_at = now;
+      await conn.query('UPDATE swap_plans SET a_confirmed_at=? WHERE id=?', [now, planId]);
+    }
+    if (!isA && !plan.b_confirmed_at) {
+      plan.b_confirmed_at = now;
+      await conn.query('UPDATE swap_plans SET b_confirmed_at=? WHERE id=?', [now, planId]);
+    }
+    if (plan.a_confirmed_at && plan.b_confirmed_at) {
+      await conn.query("UPDATE swap_plans SET status='active' WHERE id=?", [planId]);
+      const [existing] = await conn.query('SELECT id FROM orders WHERE plan_id=? LIMIT 1', [planId]);
+      if (!existing.length) {
+        const orderA = id('o');
+        const orderB = id('o');
+        await conn.query(
+          `INSERT INTO orders
+           (id,item_id,buyer_id,seller_id,amount,status,order_type,plan_id,delivery,created_at,deadline,paid_at,reviewed)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0)`,
+          [orderA, plan.item_a_id, plan.user_b_id, plan.user_a_id, 0, 'to_deliver', 'swap', planId, '面交', now, now, now]
+        );
+        await conn.query(
+          `INSERT INTO orders
+           (id,item_id,buyer_id,seller_id,amount,status,order_type,plan_id,delivery,created_at,deadline,paid_at,reviewed)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0)`,
+          [orderB, plan.item_b_id, plan.user_a_id, plan.user_b_id, 0, 'to_deliver', 'swap', planId, '面交', now, now, now]
+        );
+      }
+      plan.status = 'active';
+    }
+    await conn.commit();
+    return mapSwapPlan(plan);
+  } catch (e) {
+    await conn.rollback();
+    throw e;
+  } finally {
+    conn.release();
+  }
+}
+
+async function rejectSwapPlan(planId, userId) {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [rows] = await conn.query('SELECT * FROM swap_plans WHERE id=? FOR UPDATE', [planId]);
+    const plan = rows[0];
+    if (!plan) throw httpError(404, '置换方案不存在');
+    if (plan.user_a_id !== userId && plan.user_b_id !== userId) throw httpError(403, '无权拒绝该方案');
+    if (plan.status !== 'pending') throw httpError(409, '该方案已确认或已结束');
+    await cancelSwapPlanTx(conn, plan);
+    await conn.commit();
+    return { ok: true };
+  } catch (e) {
+    await conn.rollback();
+    throw e;
+  } finally {
+    conn.release();
+  }
+}
+
+async function completeSwapPlan(planId, userId) {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [rows] = await conn.query('SELECT * FROM swap_plans WHERE id=? FOR UPDATE', [planId]);
+    const plan = rows[0];
+    if (!plan) throw httpError(404, '置换方案不存在');
+    if (plan.user_a_id !== userId && plan.user_b_id !== userId) throw httpError(403, '无权完成该方案');
+    if (plan.status !== 'active') throw httpError(409, '双方确认后才能完成置换');
+    const [items] = await conn.query(
+      'SELECT * FROM items WHERE id IN (?,?) ORDER BY id FOR UPDATE',
+      [plan.item_a_id, plan.item_b_id]
+    );
+    if (items.length !== 2) throw httpError(409, '置换物品不存在');
+    const itemA = items.find(i => i.id === plan.item_a_id);
+    const itemB = items.find(i => i.id === plan.item_b_id);
+    if (!itemA || !itemB || itemA.status !== 'locked' || itemB.status !== 'locked') {
+      throw httpError(409, '物品状态已变化，无法完成置换');
+    }
+    if (itemA.owner_id !== plan.user_a_id || itemB.owner_id !== plan.user_b_id) {
+      throw httpError(409, '物品归属已变化，无法完成置换');
+    }
+    const now = Date.now();
+    const [swapA] = await conn.query(
+      "UPDATE items SET owner_id=?, status='completed' WHERE id=? AND owner_id=? AND status='locked'",
+      [plan.user_b_id, plan.item_a_id, plan.user_a_id]
+    );
+    const [swapB] = await conn.query(
+      "UPDATE items SET owner_id=?, status='completed' WHERE id=? AND owner_id=? AND status='locked'",
+      [plan.user_a_id, plan.item_b_id, plan.user_b_id]
+    );
+    if (swapA.affectedRows !== 1 || swapB.affectedRows !== 1) throw httpError(409, '物品归属已变化，无法完成置换');
+    const [orderUpdate] = await conn.query(
+      "UPDATE orders SET status='completed', completed_at=? WHERE plan_id=? AND status='to_deliver'",
+      [now, planId]
+    );
+    if (orderUpdate.affectedRows < 2) throw httpError(409, '置换单状态异常，无法完成');
+    await conn.query("UPDATE swap_plans SET status='completed', completed_at=? WHERE id=?", [now, planId]);
+    await conn.query("UPDATE swap_intents SET status='completed' WHERE id IN (?,?)", [plan.intent_a_id, plan.intent_b_id]);
+    await conn.commit();
+    plan.status = 'completed';
+    plan.completed_at = now;
+    return mapSwapPlan(plan);
+  } catch (e) {
+    await conn.rollback();
+    throw e;
+  } finally {
+    conn.release();
+  }
+}
+
 async function resetData() {
   const conn = await pool.getConnection();
   try {
@@ -481,6 +816,8 @@ async function resetData() {
     await conn.query('DELETE FROM payments');
     await conn.query('DELETE FROM audits');
     await conn.query('DELETE FROM orders');
+    await conn.query('DELETE FROM swap_plans');
+    await conn.query('DELETE FROM swap_intents');
     await conn.query('DELETE FROM items');
     await conn.query('DELETE FROM users');
     await conn.commit();
@@ -510,6 +847,8 @@ async function syncState(snapshot) {
     await conn.query('DELETE FROM payments');
     await conn.query('DELETE FROM audits');
     await conn.query('DELETE FROM orders');
+    await conn.query('DELETE FROM swap_plans');
+    await conn.query('DELETE FROM swap_intents');
     await conn.query('DELETE FROM items');
     if (users.length) {
       const userRows = [];
@@ -618,6 +957,22 @@ async function routeApi(req, res, url) {
     if (o[2] === 'cancel') return sendJson(res, 200, { order: await cancelOrder(o[1], user.id) });
     if (o[2] === 'deliver') return sendJson(res, 200, { order: await deliverOrder(o[1], user.id) });
     return sendJson(res, 200, { order: await confirmOrder(o[1], user.id) });
+  }
+  if (p === '/api/swaps/intents' && req.method === 'POST') {
+    const user = await requireAuth(req);
+    return sendJson(res, 200, await createSwapIntent(user, await readBody(req)));
+  }
+  const si = p.match(/^\/api\/swaps\/intents\/([^/]+)\/cancel$/);
+  if (si && req.method === 'POST') {
+    const user = await requireAuth(req);
+    return sendJson(res, 200, await cancelSwapIntent(si[1], user.id));
+  }
+  const sp = p.match(/^\/api\/swaps\/plans\/([^/]+)\/(confirm|reject|complete)$/);
+  if (sp && req.method === 'POST') {
+    const user = await requireAuth(req);
+    if (sp[2] === 'confirm') return sendJson(res, 200, { plan: await confirmSwapPlan(sp[1], user.id) });
+    if (sp[2] === 'reject') return sendJson(res, 200, await rejectSwapPlan(sp[1], user.id));
+    return sendJson(res, 200, { plan: await completeSwapPlan(sp[1], user.id) });
   }
   if (p === '/api/reviews' && req.method === 'POST') {
     const user = await requireAuth(req);

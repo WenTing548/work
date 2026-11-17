@@ -34,7 +34,7 @@ const CAT_STYLE = {
 const CAT_SHORT = { '教材': '书', '数码': '机', '出行': '车', '生活': '灯', '乐器': '琴' };
 const CONDITION_LABEL = { 'new': '全新', '90': '九成新', '70': '七成新', '50': '五成新' };
 
-let db = { users: [], items: [], orders: [], reviews: [], tx: [], audits: [] };
+let db = { users: [], items: [], orders: [], reviews: [], tx: [], audits: [], swaps: { intents: [], plans: [] } };
 let currentUserId = store.getItem(SESSION_KEY) || null;
 let countdownTimer = null;
 let reviewRating = 5;
@@ -124,13 +124,14 @@ async function refreshState(renderAfter = true) {
   if (res.status === 401) {
     currentUserId = null;
     store.removeItem(SESSION_KEY);
-    db = { users: [], items: [], orders: [], reviews: [], tx: [], audits: [] };
+    db = { users: [], items: [], orders: [], reviews: [], tx: [], audits: [], swaps: { intents: [], plans: [] } };
     if (renderAfter) renderLogin();
     return null;
   }
   if (!res.ok) throw new Error('后端返回 ' + res.status);
   const data = await res.json();
   db = data.db;
+  db.swaps = db.swaps || { intents: [], plans: [] };
   if (data.user) {
     currentUserId = data.user.id;
     store.setItem(SESSION_KEY, currentUserId);
@@ -203,11 +204,12 @@ function shell(content) {
   const nav = [
     ['home', '首页'],
     ['publish', '发布闲置'],
+    ['swaps', '置换'],
     ['orders', '我的订单'],
     ['wallet', '钱包'],
     ['my', '我的']
   ];
-  if (isAdmin) nav.splice(1, 3, ['admin', '审核后台'], ['orders', '全部订单']);
+  if (isAdmin) nav.splice(1, 4, ['admin', '审核后台'], ['orders', '全部订单']);
   return `
   <header class="app-header">
     <div class="header-inner">
@@ -232,6 +234,7 @@ function renderRoute(user) {
     case 'home': return viewHome(user);
     case 'detail': return viewDetail(user);
     case 'publish': return viewPublish(user);
+    case 'swaps': return viewSwaps(user);
     case 'orders': return viewOrders(user);
     case 'orderDetail': return viewOrderDetail(user);
     case 'wallet': return viewWallet(user);
@@ -343,7 +346,7 @@ async function logout() {
   try { await api('/api/logout'); } catch (e) { /* 本地仍然清状态 */ }
   currentUserId = null;
   store.removeItem(SESSION_KEY);
-  db = { users: [], items: [], orders: [], reviews: [], tx: [], audits: [] };
+  db = { users: [], items: [], orders: [], reviews: [], tx: [], audits: [], swaps: { intents: [], plans: [] } };
   ui = { route: 'home', itemId: null, orderId: null, q: '', cat: '全部', orderTab: 'all', adminTab: 'audit', loginTab: 'login' };
   renderLogin();
 }
@@ -547,10 +550,133 @@ async function confirmOrder(id) {
   }
 }
 
+/* ---------- swaps ---------- */
+function swapIntentStatusText(s) {
+  return { active: '等待对方回应', matched: '已生成方案', cancelled: '已取消', completed: '已完成' }[s] || s;
+}
+function swapPlanStatusText(s) {
+  return { pending: '待双方确认', active: '待完成置换', completed: '已完成', cancelled: '已取消' }[s] || s;
+}
+function viewSwaps(user) {
+  if (user.role === 'admin') return `<div class="empty">运营账号不参与置换。<button class="btn ghost" onclick="go('admin')">返回后台</button></div>`;
+  const myItems = db.items.filter(i => i.ownerId === user.id && i.status === 'on_sale');
+  const targets = db.items.filter(i => i.ownerId !== user.id && i.status === 'on_sale');
+  const intents = (db.swaps && db.swaps.intents) || [];
+  const plans = (db.swaps && db.swaps.plans) || [];
+  const form = myItems.length && targets.length ? `
+    <form onsubmit="createSwapIntent(event)">
+      <div class="form-grid">
+        <div class="field"><label>我的物品</label><select name="myItemId" required>${myItems.map(i => `<option value="${i.id}">${esc(i.title)} · ${money(i.price)}</option>`).join('')}</select></div>
+        <div class="field"><label>想换的物品</label><select name="targetItemId" required>${targets.map(i => `<option value="${i.id}">${esc(i.title)} · ${esc((getUser(i.ownerId) || {}).name || '同学')} · ${money(i.price)}</option>`).join('')}</select></div>
+      </div>
+      <div class="form-note">双方都发出指向彼此的意向时，系统才会生成置换方案；方案 10 分钟内双方确认，确认后生成两张 0 元置换单，线下交付后点“完成置换”。</div>
+      <div class="submit-row"><button class="btn orange" type="submit">发起置换意向</button></div>
+    </form>` : `<div class="empty">${myItems.length ? '目前没有其他同学的在售物品可换。' : '你还没有在售物品，先去发布一件吧。'}<br><button class="btn ghost" style="margin-top:12px" onclick="go('${myItems.length ? 'home' : 'publish'}')">${myItems.length ? '去逛逛' : '去发布'}</button></div>`;
+  return `<div class="page-head"><div><h1>置换</h1><p>两人互换 · 不经过钱包 · 双方确认后线下交付</p></div></div>
+  <div class="panel"><h3 style="margin:0 0 4px;font-size:14px">发起置换意向</h3><p class="small muted" style="margin:0 0 13px">先选自己的在售物品，再选想换的在售物品。</p>${form}</div>
+  <div class="section-head"><div><h2>我的置换方案</h2><p>${plans.length} 个方案</p></div></div>
+  ${plans.length ? `<div class="order-list">${plans.map(p => swapPlanCard(p, user)).join('')}</div>` : '<div class="empty">还没有置换方案。双方互相发起意向后会自动生成。</div>'}
+  <div class="section-head"><div><h2>我发出的意向</h2><p>${intents.length} 条</p></div></div>
+  ${intents.length ? `<div class="order-list">${intents.map(i => swapIntentCard(i, user)).join('')}</div>` : '<div class="empty">还没有发出过置换意向。</div>'}`;
+}
+function swapIntentCard(intent, user) {
+  const myItem = getItem(intent.myItemId);
+  const target = getItem(intent.targetItemId);
+  const canCancel = intent.status === 'active';
+  return `<div class="order-card">
+    <div class="order-top"><span class="order-id">意向 ${intent.id} · ${fmtTime(intent.createdAt)}</span><span class="status ${intent.status === 'active' ? 'to_confirm' : intent.status === 'matched' ? 'completed' : 'cancelled'}">${swapIntentStatusText(intent.status)}</span></div>
+    <div class="order-main">
+      <div class="order-thumb" style="background:${myItem ? thumbBg(myItem) : CAT_STYLE['教材']}">${myItem ? thumbChar(myItem) : '我'}</div>
+      <div class="order-item"><b>${esc(myItem ? myItem.title : '物品已删除')}</b><small>换 → ${esc(target ? target.title : '物品已删除')} · 卖家 ${esc((target && getUser(target.ownerId) || {}).name || '—')}</small></div>
+      <div class="order-amount" style="font-size:13px;color:var(--green)">互换</div>
+    </div>
+    ${canCancel ? `<div class="order-actions"><button class="btn line small" onclick="cancelSwapIntent('${intent.id}')">取消意向</button></div>` : ''}
+  </div>`;
+}
+function swapPlanCard(plan, user) {
+  const isA = plan.userAId === user.id;
+  const myItem = getItem(isA ? plan.itemAId : plan.itemBId);
+  const otherItem = getItem(isA ? plan.itemBId : plan.itemAId);
+  const otherId = isA ? plan.userBId : plan.userAId;
+  const other = getUser(otherId);
+  const mineConfirmed = isA ? plan.aConfirmedAt : plan.bConfirmedAt;
+  const actions = [];
+  if (plan.status === 'pending') {
+    if (!mineConfirmed) actions.push(`<button class="btn orange small" onclick="confirmSwapPlan('${plan.id}')">确认置换</button>`);
+    else actions.push('<span class="small muted" style="align-self:center">已确认，等待对方</span>');
+    actions.push(`<button class="btn line small" onclick="rejectSwapPlan('${plan.id}')">放弃方案</button>`);
+  }
+  if (plan.status === 'active') actions.push(`<button class="btn small" onclick="completeSwapPlan('${plan.id}')">完成置换</button>`);
+  return `<div class="order-card">
+    <div class="order-top"><span class="order-id">方案 ${plan.id} · ${fmtTime(plan.createdAt)}</span><span class="status ${plan.status === 'completed' ? 'completed' : plan.status === 'active' ? 'to_confirm' : plan.status === 'cancelled' ? 'cancelled' : 'to_deliver'}">${swapPlanStatusText(plan.status)}</span></div>
+    <div class="order-main">
+      <div class="order-thumb" style="background:${myItem ? thumbBg(myItem) : CAT_STYLE['教材']}">${myItem ? thumbChar(myItem) : '我'}</div>
+      <div class="order-item"><b>${esc(myItem ? myItem.title : '物品已删除')} ⇄ ${esc(otherItem ? otherItem.title : '物品已删除')}</b><small>对方 ${esc(other ? other.name : '—')} · ${plan.status === 'pending' ? '双方确认后生成置换单' : plan.status === 'active' ? '线下交付后点完成' : '已结束'} · ${fmtTime(plan.confirmDeadline)} 截止</small></div>
+      <div class="order-amount" style="font-size:13px;color:var(--green)">0 元</div>
+    </div>
+    ${actions.length ? `<div class="order-actions">${actions.join('')}</div>` : ''}
+  </div>`;
+}
+async function createSwapIntent(e) {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  try {
+    const data = await api('/api/swaps/intents', { myItemId: String(fd.get('myItemId')), targetItemId: String(fd.get('targetItemId')) });
+    await refreshState(false);
+    toast(data.plan ? '双方意向匹配成功，已生成置换方案' : '置换意向已发出，等待对方回应');
+    go('swaps');
+  } catch (err) {
+    toast(err.message || '发起置换失败');
+  }
+}
+async function cancelSwapIntent(id) {
+  if (!window.confirm('确定取消这条置换意向吗？')) return;
+  try {
+    await api(`/api/swaps/intents/${encodeURIComponent(id)}/cancel`);
+    await refreshState(false);
+    toast('置换意向已取消');
+    go('swaps');
+  } catch (err) {
+    toast(err.message || '取消失败');
+  }
+}
+async function confirmSwapPlan(id) {
+  try {
+    await api(`/api/swaps/plans/${encodeURIComponent(id)}/confirm`);
+    await refreshState(false);
+    toast('已确认置换；双方都确认后会生成两张置换单');
+    go('swaps');
+  } catch (err) {
+    toast(err.message || '确认失败');
+  }
+}
+async function rejectSwapPlan(id) {
+  if (!window.confirm('放弃后双方物品会解锁，确定吗？')) return;
+  try {
+    await api(`/api/swaps/plans/${encodeURIComponent(id)}/reject`);
+    await refreshState(false);
+    toast('方案已取消，物品已解锁');
+    go('swaps');
+  } catch (err) {
+    toast(err.message || '取消失败');
+  }
+}
+async function completeSwapPlan(id) {
+  if (!window.confirm('确认已完成线下交付并交换物品吗？完成后双方物品归属会互换。')) return;
+  try {
+    await api(`/api/swaps/plans/${encodeURIComponent(id)}/complete`);
+    await refreshState(false);
+    toast('置换完成，物品归属已互换');
+    go('swaps');
+  } catch (err) {
+    toast(err.message || '完成失败');
+  }
+}
+
 /* ---------- orders ---------- */
 function viewOrders(user) {
   const isAdmin = user.role === 'admin';
-  let list = db.orders.slice();
+  let list = db.orders.filter(o => o.orderType !== 'swap');
   if (!isAdmin) list = list.filter(o => o.buyerId === user.id || o.sellerId === user.id);
   if (ui.orderTab !== 'all') list = list.filter(o => o.status === ui.orderTab);
   list.sort((a, b) => b.createdAt - a.createdAt);
@@ -586,6 +712,7 @@ function orderCard(order, user) {
 function viewOrderDetail(user) {
   const order = getOrder(ui.orderId);
   if (!order) return `<div class="empty">订单不存在。<button class="btn ghost" onclick="go('orders')">返回订单</button></div>`;
+  if (order.orderType === 'swap') return `<div class="empty">这是一张置换单，确认和完成都在“置换”页面操作。<br><button class="btn orange" style="margin-top:14px" onclick="go('swaps')">去置换页面</button></div>`;
   const item = getItem(order.itemId);
   const buyer = getUser(order.buyerId);
   const seller = getUser(order.sellerId);
@@ -803,7 +930,7 @@ async function resetDemo() {
     await api('/api/logout');
     store.removeItem(SESSION_KEY);
     currentUserId = null;
-    db = { users: [], items: [], orders: [], reviews: [], tx: [], audits: [] };
+    db = { users: [], items: [], orders: [], reviews: [], tx: [], audits: [], swaps: { intents: [], plans: [] } };
     ui = { route: 'home', itemId: null, orderId: null, q: '', cat: '全部', orderTab: 'all', adminTab: 'audit', loginTab: 'login' };
     toast('MySQL 演示数据已重置');
     renderLogin();

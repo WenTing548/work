@@ -50,17 +50,17 @@ npm test
 
 测试会自动：
 
-1. 删除 `shiguangji_test` 里的 6 张表；
+1. 删除 `shiguangji_test` 里的 8 张表；
 2. 用 `server.js` 重新建表并 seed；
 3. 启动 3111 测试服务；
-4. 跑 11 个断言；
+4. 跑 18 个断言；
 5. 结束后停服务并清理测试表。
 
 预期结果：
 
 ```text
-tests 11
-pass 11
+tests 18
+pass 18
 fail 0
 ```
 
@@ -97,6 +97,13 @@ npm test
 | 9 | student1 审核 i5 | 403；admin 审核 200，i5 变 `on_sale` |
 | 10 | admin 看全量 + `POST /api/sync` | 全量可见；sync 返回 404 |
 | 11 | student1 `POST /api/reset`；退出后 `/api/me` | reset 403；退出后 401 |
+| 12 | student1 单方发起置换意向 | 200，intent 为 active，不生成 plan |
+| 13 | student2 反向发起意向 | 生成 pending plan，双方物品 locked |
+| 14 | 双方确认置换方案 | plan 变 active，生成两张 0 元 `swap` 订单 |
+| 15 | 完成置换 | 双方物品 owner 互换，订单/方案 completed |
+| 16 | 普通订单接口操作置换单 | 409，必须走置换页面 |
+| 17 | 放弃置换方案 | 物品回到 on_sale，方案 cancelled |
+| 18 | 非参与者确认不存在的方案 | 404 |
 
 ## 7. 注意
 
@@ -109,12 +116,14 @@ npm test
 ## 8. 当前状态
 
 P0-4 已覆盖鉴权、数据范围、越权支付、学生越权审核、sync 关闭、退出失效。
+P5 已覆盖两人置换的单方意向、反向匹配、双方确认、生成置换单、完成互换、
+拒绝解锁和普通订单接口隔离。
 
 尚未覆盖：
 
 - 登录限流 / 暴力破解；
 - CSRF token；
-- 并发支付、重复回调；
+- 并发支付、重复回调、并发置换死锁；
 - 真实文件上传；
 - 浏览器端 E2E 自动化。
 

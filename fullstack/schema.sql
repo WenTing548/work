@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS orders (
   seller_id VARCHAR(32) NOT NULL,
   amount DECIMAL(10,2) NOT NULL,
   status VARCHAR(20) NOT NULL DEFAULT 'unpaid',
+  order_type VARCHAR(16) NOT NULL DEFAULT 'normal',
+  plan_id VARCHAR(32) NULL,
   delivery VARCHAR(20) NOT NULL,
   created_at BIGINT NOT NULL,
   deadline BIGINT NOT NULL,
@@ -87,4 +89,46 @@ CREATE TABLE IF NOT EXISTS audits (
   at BIGINT NOT NULL,
   CONSTRAINT fk_audits_item FOREIGN KEY (item_id) REFERENCES items(id),
   CONSTRAINT fk_audits_operator FOREIGN KEY (operator_id) REFERENCES users(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 两人置换：意向只表达“我的某件物品想换对方的某件物品”；
+-- 双方意向互相指向时才生成方案，方案确认后生成两张 0 元置换单。
+CREATE TABLE IF NOT EXISTS swap_intents (
+  id VARCHAR(32) PRIMARY KEY,
+  user_id VARCHAR(32) NOT NULL,
+  my_item_id VARCHAR(32) NOT NULL,
+  target_item_id VARCHAR(32) NOT NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'active',
+  created_at BIGINT NOT NULL,
+  KEY idx_swap_intents_user (user_id),
+  KEY idx_swap_intents_target (target_item_id, status),
+  CONSTRAINT fk_swap_intents_user FOREIGN KEY (user_id) REFERENCES users(id),
+  CONSTRAINT fk_swap_intents_my_item FOREIGN KEY (my_item_id) REFERENCES items(id),
+  CONSTRAINT fk_swap_intents_target_item FOREIGN KEY (target_item_id) REFERENCES items(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS swap_plans (
+  id VARCHAR(32) PRIMARY KEY,
+  intent_a_id VARCHAR(32) NOT NULL,
+  intent_b_id VARCHAR(32) NOT NULL,
+  item_a_id VARCHAR(32) NOT NULL,
+  item_b_id VARCHAR(32) NOT NULL,
+  user_a_id VARCHAR(32) NOT NULL,
+  user_b_id VARCHAR(32) NOT NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'pending',
+  created_at BIGINT NOT NULL,
+  confirm_deadline BIGINT NOT NULL,
+  a_confirmed_at BIGINT NULL,
+  b_confirmed_at BIGINT NULL,
+  completed_at BIGINT NULL,
+  cancelled_at BIGINT NULL,
+  UNIQUE KEY uk_swap_plan_pair (intent_a_id, intent_b_id),
+  KEY idx_swap_plans_user_a (user_a_id),
+  KEY idx_swap_plans_user_b (user_b_id),
+  CONSTRAINT fk_swap_plans_intent_a FOREIGN KEY (intent_a_id) REFERENCES swap_intents(id),
+  CONSTRAINT fk_swap_plans_intent_b FOREIGN KEY (intent_b_id) REFERENCES swap_intents(id),
+  CONSTRAINT fk_swap_plans_item_a FOREIGN KEY (item_a_id) REFERENCES items(id),
+  CONSTRAINT fk_swap_plans_item_b FOREIGN KEY (item_b_id) REFERENCES items(id),
+  CONSTRAINT fk_swap_plans_user_a FOREIGN KEY (user_a_id) REFERENCES users(id),
+  CONSTRAINT fk_swap_plans_user_b FOREIGN KEY (user_b_id) REFERENCES users(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
