@@ -89,6 +89,7 @@ function loadDB() {
 async function api(path, body) {
   const res = await fetch(path, {
     method: 'POST',
+    credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body || {})
   });
@@ -118,8 +119,15 @@ async function flushSync() {
     if (syncDirty) saveDB();
   }
 }
-async function refreshState(userId = currentUserId, renderAfter = true) {
-  const res = await fetch('/api/bootstrap' + (userId ? '?userId=' + encodeURIComponent(userId) : ''));
+async function refreshState(renderAfter = true) {
+  const res = await fetch('/api/bootstrap', { credentials: 'same-origin' });
+  if (res.status === 401) {
+    currentUserId = null;
+    store.removeItem(SESSION_KEY);
+    db = { users: [], items: [], orders: [], reviews: [], tx: [], audits: [] };
+    if (renderAfter) renderLogin();
+    return null;
+  }
   if (!res.ok) throw new Error('后端返回 ' + res.status);
   const data = await res.json();
   db = data.db;
@@ -294,9 +302,7 @@ async function doLogin(e) {
   const password = String(fd.get('password') || '');
   try {
     const { user } = await api('/api/login', { username, password });
-    currentUserId = user.id;
-    store.setItem(SESSION_KEY, user.id);
-    await refreshState(user.id, false);
+    await refreshState(false);
     ui.route = user.role === 'admin' ? 'admin' : 'home';
     toast(`欢迎回来，${user.name}`);
     render();
@@ -308,9 +314,7 @@ async function quickLogin(username) {
   const passwords = { student1: '123456', student2: '123456', admin: 'admin123' };
   try {
     const { user } = await api('/api/login', { username, password: passwords[username] || '123456' });
-    currentUserId = user.id;
-    store.setItem(SESSION_KEY, user.id);
-    await refreshState(user.id, false);
+    await refreshState(false);
     ui.route = user.role === 'admin' ? 'admin' : 'home';
     toast(`已切换为 ${user.name}`);
     render();
@@ -327,9 +331,7 @@ async function doRegister(e) {
   const password = String(fd.get('password') || '');
   try {
     const { user } = await api('/api/register', { username, name, college, password });
-    currentUserId = user.id;
-    store.setItem(SESSION_KEY, user.id);
-    await refreshState(user.id, false);
+    await refreshState(false);
     ui.route = 'home';
     toast('注册成功，已赠送 ¥300 演示余额');
     render();
@@ -337,11 +339,13 @@ async function doRegister(e) {
     toast(err.message || '注册失败');
   }
 }
-function logout() {
+async function logout() {
+  try { await api('/api/logout'); } catch (e) { /* 本地仍然清状态 */ }
   currentUserId = null;
   store.removeItem(SESSION_KEY);
-  ui.route = 'home';
-  render();
+  db = { users: [], items: [], orders: [], reviews: [], tx: [], audits: [] };
+  ui = { route: 'home', itemId: null, orderId: null, q: '', cat: '全部', orderTab: 'all', adminTab: 'audit', loginTab: 'login' };
+  renderLogin();
 }
 
 /* ---------- home ---------- */
@@ -455,23 +459,21 @@ function viewDetail(user) {
     </div>
   </div>`;
 }
-function buyItem(id) {
+async function buyItem(id) {
   const user = me();
   const item = getItem(id);
   if (!item || item.status !== 'on_sale') return toast('该物品当前不可购买');
   if (item.ownerId === user.id) return toast('不能购买自己发布的物品');
   if (user.role !== 'student') return toast('运营账号不能购买');
   if (user.balance < item.price) { toast('余额不足，请先到钱包充值'); return go('wallet'); }
-  const order = {
-    id: nextId('O'), itemId: item.id, buyerId: user.id, sellerId: item.ownerId,
-    amount: item.price, status: 'unpaid', delivery: item.delivery,
-    createdAt: Date.now(), deadline: Date.now() + 30000, reviewed: false
-  };
-  item.status = 'locked';
-  db.orders.unshift(order);
-  saveDB();
-  toast('订单已创建，请在 30 秒内支付');
-  go('orderDetail', { orderId: order.id });
+  try {
+    const { order } = await api('/api/orders', { itemId: id });
+    await refreshState(false);
+    toast('订单已创建，请在 30 秒内支付');
+    go('orderDetail', { orderId: order.id });
+  } catch (err) {
+    toast(err.message || '下单失败');
+  }
 }
 function startCountdown() {
   clearInterval(countdownTimer);
@@ -489,62 +491,60 @@ function startCountdown() {
   tick();
   countdownTimer = setInterval(tick, 500);
 }
-function payOrder(id) {
+async function payOrder(id) {
   const order = getOrder(id);
   const user = me();
   if (!order || order.status !== 'unpaid') return toast('订单状态已变化');
-  if (Date.now() > order.deadline) { cancelOrder(id, true); return; }
+  if (Date.now() > order.deadline) { return cancelOrder(id, true); }
   if (user.balance < order.amount) { toast('余额不足'); return go('wallet'); }
-  user.balance -= order.amount;
-  order.status = 'to_deliver';
-  order.paidAt = Date.now();
-  db.tx.unshift({ id: nextId('t'), userId: user.id, type: '支付', amount: -order.amount, note: `订单 ${order.id} · 平台托管`, at: Date.now() });
-  saveDB();
-  toast('支付成功，金额已进入平台托管');
-  go('orderDetail', { orderId: id });
+  try {
+    await api(`/api/orders/${encodeURIComponent(id)}/pay`);
+    await refreshState(false);
+    toast('支付成功，金额已进入平台托管');
+    go('orderDetail', { orderId: id });
+  } catch (err) {
+    toast(err.message || '支付失败');
+  }
 }
-function cancelOrder(id, auto = false) {
+async function cancelOrder(id, auto = false) {
   const order = getOrder(id);
   if (!order || order.status !== 'unpaid') return;
-  order.status = 'cancelled';
-  order.cancelledAt = Date.now();
-  const item = getItem(order.itemId);
-  if (item && item.status === 'locked') item.status = 'on_sale';
-  saveDB();
-  clearInterval(countdownTimer);
-  toast(auto ? '订单超时，已自动取消并解锁物品' : '订单已取消，物品已回到在售');
-  if (ui.route === 'orderDetail' && ui.orderId === id) go('orderDetail', { orderId: id });
-  else render();
+  try {
+    await api(`/api/orders/${encodeURIComponent(id)}/cancel`);
+    await refreshState(false);
+    clearInterval(countdownTimer);
+    toast(auto ? '订单超时，已自动取消并解锁物品' : '订单已取消，物品已回到在售');
+    if (ui.route === 'orderDetail' && ui.orderId === id) go('orderDetail', { orderId: id });
+    else render();
+  } catch (err) {
+    toast(err.message || '取消失败');
+  }
 }
-function deliverOrder(id) {
+async function deliverOrder(id) {
   const order = getOrder(id);
   if (!order || order.status !== 'to_deliver') return toast('订单状态不允许交付');
   if (order.sellerId !== me().id) return toast('只有卖家可以确认交付');
-  order.status = 'to_confirm';
-  order.deliveredAt = Date.now();
-  saveDB();
-  toast('已记录交付，等待买家确认收货');
-  render();
+  try {
+    await api(`/api/orders/${encodeURIComponent(id)}/deliver`);
+    await refreshState(false);
+    toast('已记录交付，等待买家确认收货');
+    render();
+  } catch (err) {
+    toast(err.message || '交付失败');
+  }
 }
-function confirmOrder(id) {
+async function confirmOrder(id) {
   const order = getOrder(id);
   if (!order || order.status !== 'to_confirm') return toast('订单状态不允许确认');
   if (order.buyerId !== me().id) return toast('只有买家可以确认收货');
-  order.status = 'completed';
-  order.completedAt = Date.now();
-  const item = getItem(order.itemId);
-  if (item) item.status = 'completed';
-  const seller = getUser(order.sellerId);
-  if (seller) {
-    seller.balance += order.amount;
-    seller.credit = Math.min(100, (seller.credit || 0) + 2);
-    db.tx.unshift({ id: nextId('t'), userId: seller.id, type: '放款', amount: order.amount, note: `订单 ${order.id} · 托管放款`, at: Date.now() });
+  try {
+    await api(`/api/orders/${encodeURIComponent(id)}/confirm`);
+    await refreshState(false);
+    toast('已确认收货，托管金额已放款给卖家');
+    go('orderDetail', { orderId: id });
+  } catch (err) {
+    toast(err.message || '确认失败');
   }
-  const buyer = me();
-  buyer.credit = Math.min(100, (buyer.credit || 0) + 2);
-  saveDB();
-  toast('已确认收货，托管金额已放款给卖家');
-  go('orderDetail', { orderId: id });
 }
 
 /* ---------- orders ---------- */
@@ -657,23 +657,27 @@ function viewPublish(user) {
     </form>
   </div>`;
 }
-function publishItem(e) {
+async function publishItem(e) {
   e.preventDefault();
   const fd = new FormData(e.target);
   const title = String(fd.get('title') || '').trim();
   const price = Number(fd.get('price'));
   if (title.length < 2) return toast('标题至少 2 个字');
   if (!price || price <= 0) return toast('请输入有效售价');
-  const item = {
-    id: nextId('i'), ownerId: me().id, title, category: String(fd.get('category')),
+  const payload = {
+    title, category: String(fd.get('category')),
     price, originalPrice: Number(fd.get('originalPrice')) || price,
     condition: String(fd.get('condition')), description: String(fd.get('description') || '').trim(),
-    delivery: String(fd.get('delivery')), status: 'pending', createdAt: Date.now(), views: 0
+    delivery: String(fd.get('delivery'))
   };
-  db.items.unshift(item);
-  saveDB();
-  toast('已提交审核，运营通过后自动上架');
-  go('my');
+  try {
+    await api('/api/items', payload);
+    await refreshState(false);
+    toast('已提交审核，运营通过后自动上架');
+    go('my');
+  } catch (err) {
+    toast(err.message || '发布失败');
+  }
 }
 
 /* ---------- wallet ---------- */
@@ -685,14 +689,17 @@ function viewWallet(user) {
   <div class="section-head"><div><h2>资金流水</h2><p>共 ${tx.length} 条</p></div></div>
   ${tx.length ? `<div class="tx-list">${tx.map(t => `<div class="tx-row"><div class="tx-icon">${t.amount > 0 ? '＋' : '－'}</div><div class="tx-info"><b>${esc(t.type)}</b><small>${fmtTime(t.at)} · ${esc(t.note || '')}</small></div><div class="tx-amount ${t.amount > 0 ? 'plus' : 'minus'}">${t.amount > 0 ? '+' : ''}${money(t.amount)}</div></div>`).join('')}</div>` : `<div class="empty">还没有资金流水。去首页买一件物品，或者先模拟充值。</div>`}`;
 }
-function recharge() {
+async function recharge() {
   const user = me();
   if (!user || user.role === 'admin') return;
-  user.balance += 100;
-  db.tx.unshift({ id: nextId('t'), userId: user.id, type: '充值', amount: 100, note: '模拟充值', at: Date.now() });
-  saveDB();
-  toast('已充值 ¥100（演示）');
-  render();
+  try {
+    await api('/api/wallet/recharge');
+    await refreshState(false);
+    toast('已充值 ¥100（演示）');
+    render();
+  } catch (err) {
+    toast(err.message || '充值失败');
+  }
 }
 
 /* ---------- admin ---------- */
@@ -724,27 +731,31 @@ function renderAuditQueue(pending) {
     </div>`;
   }).join('')}</div>`;
 }
-function approveItem(id) {
+async function approveItem(id) {
   const item = getItem(id);
   if (!item || item.status !== 'pending') return toast('该物品不在待审核状态');
-  item.status = 'on_sale';
-  item.listedAt = Date.now();
-  db.audits.unshift({ id: nextId('a'), itemId: id, result: '通过', at: Date.now(), operator: me().id });
-  saveDB();
-  toast('已通过审核，物品自动上架');
-  render();
+  try {
+    await api(`/api/items/${encodeURIComponent(id)}/approve`);
+    await refreshState(false);
+    toast('已通过审核，物品自动上架');
+    render();
+  } catch (err) {
+    toast(err.message || '审核失败');
+  }
 }
-function rejectItem(id) {
+async function rejectItem(id) {
   const item = getItem(id);
   if (!item || item.status !== 'pending') return toast('该物品不在待审核状态');
   const reason = window.prompt('请填写驳回原因（可留空）', '信息不完整，请补充描述或图片');
   if (reason === null) return;
-  item.status = 'rejected';
-  item.rejectReason = reason || '未填写原因';
-  db.audits.unshift({ id: nextId('a'), itemId: id, result: '驳回', reason: item.rejectReason, at: Date.now(), operator: me().id });
-  saveDB();
-  toast('已驳回该物品');
-  render();
+  try {
+    await api(`/api/items/${encodeURIComponent(id)}/reject`, { reason: reason || '未填写原因' });
+    await refreshState(false);
+    toast('已驳回该物品');
+    render();
+  } catch (err) {
+    toast(err.message || '驳回失败');
+  }
 }
 function renderAdminItems() {
   const list = db.items.slice().sort((a, b) => b.createdAt - a.createdAt);
@@ -789,6 +800,7 @@ async function resetDemo() {
   if (!window.confirm('确定重置 MySQL 中的演示数据吗？此操作会清空发布、订单、流水、评价和审核记录，并恢复初始数据。')) return;
   try {
     await api('/api/reset', { confirm: 'RESET' });
+    await api('/api/logout');
     store.removeItem(SESSION_KEY);
     currentUserId = null;
     db = { users: [], items: [], orders: [], reviews: [], tx: [], audits: [] };
@@ -821,23 +833,26 @@ function setReviewRating(n) {
   const stars = document.getElementById('stars');
   if (stars) [...stars.children].forEach((b, i) => b.classList.toggle('on', i < n));
 }
-function submitReview(orderId) {
+async function submitReview(orderId) {
   const order = getOrder(orderId);
   if (!order || order.status !== 'completed' || order.reviewed) return closeModal();
   const text = (document.getElementById('review-text') || {}).value || '';
-  db.reviews.unshift({ id: nextId('r'), orderId, buyerId: order.buyerId, sellerId: order.sellerId, rating: reviewRating, text: text.trim(), at: Date.now() });
-  order.reviewed = true;
-  saveDB();
-  closeModal();
-  toast('评价已提交');
-  render();
+  try {
+    await api('/api/reviews', { orderId, rating: reviewRating, text: text.trim() });
+    await refreshState(false);
+    closeModal();
+    toast('评价已提交');
+    render();
+  } catch (err) {
+    toast(err.message || '评价失败');
+  }
 }
 
 /* ---------- boot ---------- */
 (async function boot() {
-  if (!currentUserId) { renderLogin(); return; }
   try {
-    const data = await refreshState(currentUserId, false);
+    const data = await refreshState(false);
+    if (!data) { renderLogin(); return; }
     ui.route = data.user && data.user.role === 'admin' ? 'admin' : 'home';
     render();
   } catch (err) {

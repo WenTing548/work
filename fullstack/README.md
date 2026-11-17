@@ -9,7 +9,7 @@
 | 前端 | 原生 HTML/CSS/JavaScript，响应式布局，无框架依赖 |
 | 后端 | Node.js 原生 `http` 模块 + `mysql2` 连接池 |
 | 数据库 | MySQL 8.0，数据库 `shiguangji`，专用账号 `shiguang` |
-| 鉴权 | 密码使用 bcrypt 哈希；登录签发 HttpOnly JWT Cookie。业务接口的 Cookie 鉴权仍在改造中，当前仍兼容请求体 `userId`，不能当生产安全版本 |
+| 鉴权 | 密码使用 bcrypt 哈希；登录签发 HttpOnly JWT Cookie；业务接口从 Cookie 识别当前用户，审核/同步/重置额外校验运营角色 |
 | 支付 | **模拟钱包 + 平台托管**，不接入微信/支付宝，不涉及真实资金 |
 
 ## 2. 目录
@@ -110,23 +110,23 @@ node server.js --open
 | POST | `/api/login` | 登录，成功时返回 `Set-Cookie: sg_token=...` |
 | POST | `/api/logout` | 退出登录，清除 Cookie |
 | GET | `/api/me` | 读取当前登录用户（需要 Cookie） |
-| POST | `/api/register` | 注册（赠送 ¥300 演示余额） |
-| GET | `/api/bootstrap?userId=` | 拉取当前用户 + 全部演示数据 |
-| POST | `/api/sync` | 前端状态同步到 MySQL（演示版采用整体快照同步） |
-| POST | `/api/reset` | 重置演示数据（请求体 `{"confirm":"RESET"}`） |
+| POST | `/api/register` | 注册并直接登录（赠送 ¥300 演示余额） |
+| GET | `/api/bootstrap` | 读取当前登录用户 + 演示数据（需要 Cookie） |
+| POST | `/api/sync` | 整体快照同步（仅运营；保留用于演示/运维） |
+| POST | `/api/reset` | 重置演示数据（仅运营，请求体 `{"confirm":"RESET"}`） |
 | GET | `/api/items` | 在售物品 |
-| POST | `/api/items` | 发布物品 |
+| POST | `/api/items` | 发布物品（需要学生登录） |
 | POST | `/api/items/:id/approve` | 运营通过审核 |
-| POST | `/api/orders` | 下单 |
-| POST | `/api/orders/:id/pay` | 模拟支付 |
-| POST | `/api/orders/:id/deliver` | 卖家交付 |
-| POST | `/api/orders/:id/confirm` | 买家确认收货 |
-| POST | `/api/orders/:id/cancel` | 取消未支付订单 |
-| POST | `/api/reviews` | 提交评价 |
-| POST | `/api/wallet/recharge` | 模拟充值 |
-| POST | `/api/admin/audit` | 审核（通过/驳回） |
+| POST | `/api/items/:id/reject` | 运营驳回审核 |
+| POST | `/api/orders` | 下单（需要学生登录） |
+| POST | `/api/orders/:id/pay` | 模拟支付（仅买家本人） |
+| POST | `/api/orders/:id/deliver` | 卖家交付（仅卖家本人） |
+| POST | `/api/orders/:id/confirm` | 买家确认收货（仅买家本人） |
+| POST | `/api/orders/:id/cancel` | 取消未支付订单（仅买家本人） |
+| POST | `/api/reviews` | 提交评价（仅订单双方） |
+| POST | `/api/wallet/recharge` | 模拟充值（仅学生） |
 
-演示前端主要使用 `bootstrap` + `sync` 两个接口，保证 UI 与 MySQL 中的数据一致；其余接口保留为后续按模块拆分调用的基础。
+前端已改为调用 REST 接口，登录后由浏览器自动携带 `sg_token` Cookie；`/api/sync` 只保留给运营重置/迁移场景，不作为正常业务写入通道。
 
 ## 8. 测试
 
@@ -144,7 +144,7 @@ node server.js --open
 ## 9. 已知边界（请如实说明）
 
 - 支付是**模拟钱包**，没有真实支付通道。
-- 会话：密码已使用 bcrypt 哈希；登录已签发 HttpOnly JWT Cookie，并提供 `/api/me`、`/api/logout`。但业务接口尚未全部改为从 Cookie 认人，审核/支付/交付等仍读取请求体 `userId`/`operatorId`，**当前仍可被伪造身份，不能当生产安全版本**。
+- 会话：密码使用 bcrypt 哈希；登录签发 HttpOnly JWT Cookie；`/api/bootstrap`、发布、下单、支付、取消、交付、确认、评价、充值均从 Cookie 识别当前用户，审核/同步/重置校验运营角色。仍有边界：`/api/bootstrap` 会返回全站演示数据；`/api/sync` 与 `/api/reset` 仍保留给运营；没有登录限流、CSRF token、密码找回和审计告警。课程演示可用，生产上线前需继续收紧。
 - 前端采用**整体快照同步**，适合课程演示；生产应改为按业务接口写入并加事务/幂等/并发控制。
 - 未实现：真实图片上传、学籍认证对接、悬赏/三方置换、仲裁、消息通知、压测、线上部署。
 - 6 张核心表可跑通交易闭环，但不是报告里 21 张表的全部落地。

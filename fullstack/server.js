@@ -119,6 +119,17 @@ async function getAuthUser(req) {
   }
 }
 
+async function requireAuth(req) {
+  const user = await getAuthUser(req);
+  if (!user) throw httpError(401, '请先登录');
+  return user;
+}
+
+function requireAdmin(user) {
+  if (!user || user.role !== 'admin') throw httpError(403, '只有运营可以操作');
+  return user;
+}
+
 async function init() {
   const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
   await pool.query(schema);
@@ -157,7 +168,7 @@ async function seed() {
   }
 }
 
-async function bootstrap(userId) {
+async function bootstrap(currentUser) {
   const [users] = await pool.query('SELECT id,username,name,college,role,verified,credit,balance,created_at FROM users ORDER BY created_at');
   const [items] = await pool.query('SELECT * FROM items ORDER BY created_at DESC');
   const [orders] = await pool.query('SELECT * FROM orders ORDER BY created_at DESC');
@@ -165,7 +176,7 @@ async function bootstrap(userId) {
   const [reviews] = await pool.query('SELECT * FROM reviews ORDER BY at DESC');
   const [audits] = await pool.query('SELECT * FROM audits ORDER BY at DESC');
   const safeUsers = users.map(mapUser);
-  const user = userId ? safeUsers.find(u => u.id === userId) || null : null;
+  const user = currentUser || null;
   return {
     db: {
       users: safeUsers,
@@ -223,8 +234,7 @@ async function register(body) {
   return mapUser(rows[0]);
 }
 
-async function publishItem(body) {
-  const user = await requireUser(body.ownerId);
+async function publishItem(user, body) {
   if (user.role !== 'student') throw httpError(403, '运营账号不能发布物品');
   const title = String(body.title || '').trim();
   const price = Number(body.price);
@@ -240,8 +250,7 @@ async function publishItem(body) {
   return mapItem(rows[0]);
 }
 
-async function approveItem(itemId, operatorId) {
-  const operator = await requireUser(operatorId);
+async function approveItem(itemId, operator) {
   if (operator.role !== 'admin') throw httpError(403, '只有运营可以审核');
   const [items] = await pool.query('SELECT * FROM items WHERE id = ?', [itemId]);
   if (!items[0]) throw httpError(404, '物品不存在');
@@ -252,8 +261,7 @@ async function approveItem(itemId, operatorId) {
   return mapItem(rows[0]);
 }
 
-async function rejectItem(itemId, operatorId, reason) {
-  const operator = await requireUser(operatorId);
+async function rejectItem(itemId, operator, reason) {
   if (operator.role !== 'admin') throw httpError(403, '只有运营可以审核');
   const [items] = await pool.query('SELECT * FROM items WHERE id = ?', [itemId]);
   if (!items[0]) throw httpError(404, '物品不存在');
@@ -264,15 +272,7 @@ async function rejectItem(itemId, operatorId, reason) {
   return mapItem(rows[0]);
 }
 
-async function requireUser(userId) {
-  if (!userId) throw httpError(401, '请先登录');
-  const [rows] = await pool.query('SELECT * FROM users WHERE id = ?', [userId]);
-  if (!rows[0]) throw httpError(401, '用户不存在');
-  return rows[0];
-}
-
-async function createOrder(body) {
-  const buyer = await requireUser(body.buyerId);
+async function createOrder(body, buyer) {
   if (buyer.role !== 'student') throw httpError(403, '运营账号不能购买');
   const itemId = String(body.itemId || '');
   const conn = await pool.getConnection();
@@ -331,14 +331,14 @@ async function payOrder(orderId, userId) {
   }
 }
 
-async function cancelOrder(orderId, userId, auto) {
+async function cancelOrder(orderId, userId) {
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
     const [orders] = await conn.query('SELECT * FROM orders WHERE id=? FOR UPDATE', [orderId]);
     const order = orders[0];
     if (!order) throw httpError(404, '订单不存在');
-    if (!auto && order.buyer_id !== userId) throw httpError(403, '无权取消该订单');
+    if (order.buyer_id !== userId) throw httpError(403, '无权取消该订单');
     if (order.status !== 'unpaid') throw httpError(409, '订单状态不允许取消');
     await conn.query("UPDATE orders SET status='cancelled', cancelled_at=? WHERE id=?", [Date.now(), orderId]);
     await conn.query("UPDATE items SET status='on_sale' WHERE id=? AND status='locked'", [order.item_id]);
@@ -389,8 +389,8 @@ async function confirmOrder(orderId, userId) {
   }
 }
 
-async function reviewOrder(body) {
-  const { orderId, userId, rating, text } = body;
+async function reviewOrder(body, userId) {
+  const { orderId, rating, text } = body;
   const [orders] = await pool.query('SELECT * FROM orders WHERE id=?', [orderId]);
   const order = orders[0];
   if (!order) throw httpError(404, '订单不存在');
@@ -403,8 +403,7 @@ async function reviewOrder(body) {
   return { ok: true };
 }
 
-async function recharge(body) {
-  const user = await requireUser(body.userId);
+async function recharge(user) {
   if (user.role !== 'student') throw httpError(403, '运营账号没有钱包');
   const amount = 100;
   await pool.query('UPDATE users SET balance = balance + ? WHERE id=?', [amount, user.id]);
@@ -507,7 +506,10 @@ async function syncState(snapshot) {
 async function routeApi(req, res, url) {
   const p = url.pathname;
   if (p === '/api/health' && req.method === 'GET') return sendJson(res, 200, { ok: true, service: 'shiguangji-mysql' });
-  if (p === '/api/bootstrap' && req.method === 'GET') return sendJson(res, 200, await bootstrap(url.searchParams.get('userId')));
+  if (p === '/api/bootstrap' && req.method === 'GET') {
+    const user = await requireAuth(req);
+    return sendJson(res, 200, await bootstrap(user), { 'Cache-Control': 'no-store' });
+  }
   if (p === '/api/login' && req.method === 'POST') {
     const user = await login(await readBody(req));
     return sendJson(res, 200, { user }, {
@@ -522,35 +524,58 @@ async function routeApi(req, res, url) {
     });
   }
   if (p === '/api/me' && req.method === 'GET') {
-    const user = await getAuthUser(req);
-    if (!user) throw httpError(401, '请先登录');
+    const user = await requireAuth(req);
     return sendJson(res, 200, { user }, { 'Cache-Control': 'no-store' });
   }
-  if (p === '/api/register' && req.method === 'POST') return sendJson(res, 200, { user: await register(await readBody(req)) });
-  if (p === '/api/items' && req.method === 'POST') return sendJson(res, 200, { item: await publishItem(await readBody(req)) });
-  if (p === '/api/orders' && req.method === 'POST') return sendJson(res, 200, { order: await createOrder(await readBody(req)) });
+  if (p === '/api/register' && req.method === 'POST') {
+    const user = await register(await readBody(req));
+    return sendJson(res, 200, { user }, {
+      'Set-Cookie': sessionCookie(signSession(user)),
+      'Cache-Control': 'no-store'
+    });
+  }
+  if (p === '/api/items' && req.method === 'POST') {
+    const user = await requireAuth(req);
+    return sendJson(res, 200, { item: await publishItem(user, await readBody(req)) });
+  }
+  if (p === '/api/orders' && req.method === 'POST') {
+    const buyer = await requireAuth(req);
+    return sendJson(res, 200, { order: await createOrder(await readBody(req), buyer) });
+  }
   const m = p.match(/^\/api\/items\/([^/]+)\/(approve|reject)$/);
   if (m && req.method === 'POST') {
+    const operator = await requireAuth(req);
+    requireAdmin(operator);
     const body = await readBody(req);
-    if (m[2] === 'approve') return sendJson(res, 200, { item: await approveItem(m[1], body.operatorId) });
-    return sendJson(res, 200, { item: await rejectItem(m[1], body.operatorId, body.reason) });
+    if (m[2] === 'approve') return sendJson(res, 200, { item: await approveItem(m[1], operator) });
+    return sendJson(res, 200, { item: await rejectItem(m[1], operator, body.reason) });
   }
   const o = p.match(/^\/api\/orders\/([^/]+)\/(pay|cancel|deliver|confirm)$/);
   if (o && req.method === 'POST') {
-    const body = await readBody(req);
-    if (o[2] === 'pay') return sendJson(res, 200, { order: await payOrder(o[1], body.userId) });
-    if (o[2] === 'cancel') return sendJson(res, 200, { order: await cancelOrder(o[1], body.userId, !!body.auto) });
-    if (o[2] === 'deliver') return sendJson(res, 200, { order: await deliverOrder(o[1], body.userId) });
-    return sendJson(res, 200, { order: await confirmOrder(o[1], body.userId) });
+    const user = await requireAuth(req);
+    if (o[2] === 'pay') return sendJson(res, 200, { order: await payOrder(o[1], user.id) });
+    if (o[2] === 'cancel') return sendJson(res, 200, { order: await cancelOrder(o[1], user.id) });
+    if (o[2] === 'deliver') return sendJson(res, 200, { order: await deliverOrder(o[1], user.id) });
+    return sendJson(res, 200, { order: await confirmOrder(o[1], user.id) });
   }
-  if (p === '/api/reviews' && req.method === 'POST') return sendJson(res, 200, await reviewOrder(await readBody(req)));
-  if (p === '/api/wallet/recharge' && req.method === 'POST') return sendJson(res, 200, { user: await recharge(await readBody(req)) });
+  if (p === '/api/reviews' && req.method === 'POST') {
+    const user = await requireAuth(req);
+    return sendJson(res, 200, await reviewOrder(await readBody(req), user.id));
+  }
+  if (p === '/api/wallet/recharge' && req.method === 'POST') {
+    const user = await requireAuth(req);
+    return sendJson(res, 200, { user: await recharge(user) });
+  }
   if (p === '/api/sync' && req.method === 'POST') {
+    const operator = await requireAuth(req);
+    requireAdmin(operator);
     const body = await readBody(req);
     await syncState(body.db);
     return sendJson(res, 200, { ok: true });
   }
   if (p === '/api/reset' && req.method === 'POST') {
+    const operator = await requireAuth(req);
+    requireAdmin(operator);
     const body = await readBody(req);
     if (body.confirm !== 'RESET') throw httpError(400, '缺少重置确认');
     await resetData();
