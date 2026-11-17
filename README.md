@@ -7,6 +7,12 @@
 - **全栈版（推荐）**：[`fullstack/`](fullstack/) —— Node.js + MySQL，真实后端与数据库。
 - **纯前端旧版**：[`app/`](app/) —— 数据保存在浏览器 localStorage，仅用于快速预览。
 
+### 在线演示
+
+<https://work-production-e1c5e2db.up.railway.app>
+
+> Railway 试用实例，长时间无人访问可能休眠；试用到期后需重新部署。演示账号见下表。
+
 ### 全栈版（Node.js + MySQL）
 
 进入 [`fullstack/`](fullstack/) 目录：
