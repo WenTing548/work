@@ -111,9 +111,9 @@ node server.js --open
 | POST | `/api/logout` | 退出登录，清除 Cookie |
 | GET | `/api/me` | 读取当前登录用户（需要 Cookie） |
 | POST | `/api/register` | 注册并直接登录（赠送 ¥300 演示余额） |
-| GET | `/api/bootstrap` | 读取当前登录用户 + 演示数据（需要 Cookie） |
-| POST | `/api/sync` | 整体快照同步（仅运营；保留用于演示/运维） |
-| POST | `/api/reset` | 重置演示数据（仅运营，请求体 `{"confirm":"RESET"}`） |
+| GET | `/api/bootstrap` | 按当前登录用户范围返回数据（物品、自己的订单/流水/评价；运营返回全量审核数据） |
+| POST | `/api/sync` | 整体快照同步；默认关闭，仅 `ALLOW_SYNC=true` 时运营可用 |
+| POST | `/api/reset` | 重置演示数据（仅运营 + `confirm:"RESET"`；生产环境需 `ALLOW_RESET=true`） |
 | GET | `/api/items` | 在售物品 |
 | POST | `/api/items` | 发布物品（需要学生登录） |
 | POST | `/api/items/:id/approve` | 运营通过审核 |
@@ -126,7 +126,7 @@ node server.js --open
 | POST | `/api/reviews` | 提交评价（仅订单双方） |
 | POST | `/api/wallet/recharge` | 模拟充值（仅学生） |
 
-前端已改为调用 REST 接口，登录后由浏览器自动携带 `sg_token` Cookie；`/api/sync` 只保留给运营重置/迁移场景，不作为正常业务写入通道。
+前端已改为调用 REST 接口，登录后由浏览器自动携带 `sg_token` Cookie；`/api/bootstrap` 只返回当前用户可见的数据，`/api/sync` 默认关闭，不再作为正常业务写入通道。
 
 ## 8. 测试
 
@@ -144,8 +144,8 @@ node server.js --open
 ## 9. 已知边界（请如实说明）
 
 - 支付是**模拟钱包**，没有真实支付通道。
-- 会话：密码使用 bcrypt 哈希；登录签发 HttpOnly JWT Cookie；`/api/bootstrap`、发布、下单、支付、取消、交付、确认、评价、充值均从 Cookie 识别当前用户，审核/同步/重置校验运营角色。仍有边界：`/api/bootstrap` 会返回全站演示数据；`/api/sync` 与 `/api/reset` 仍保留给运营；没有登录限流、CSRF token、密码找回和审计告警。课程演示可用，生产上线前需继续收紧。
-- 前端采用**整体快照同步**，适合课程演示；生产应改为按业务接口写入并加事务/幂等/并发控制。
+- 会话：密码使用 bcrypt 哈希；登录签发 HttpOnly JWT Cookie；`/api/bootstrap`、发布、下单、支付、取消、交付、确认、评价、充值均从 Cookie 识别当前用户，审核/重置校验运营角色。`/api/bootstrap` 已按用户收窄：学生只拿公开在售物品、自己的物品、自己参与的订单/流水/评价；其他用户只返回公开资料，不含余额。`/api/sync` 默认关闭（需 `ALLOW_SYNC=true`），`/api/reset` 生产环境需 `ALLOW_RESET=true`。仍需补：登录限流、CSRF token、密码找回、操作审计告警。
+- 前端已改为按 REST 接口写入；生产仍应补事务/幂等/并发控制，不能依赖前端状态。
 - 未实现：真实图片上传、学籍认证对接、悬赏/三方置换、仲裁、消息通知、压测、线上部署。
 - 6 张核心表可跑通交易闭环，但不是报告里 21 张表的全部落地。
 - 需要本机 MySQL 服务运行；换机器需重新建库/改配置。

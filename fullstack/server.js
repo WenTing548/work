@@ -48,6 +48,14 @@ function mapUser(r) {
     balance: Number(r.balance), createdAt: n(r.created_at)
   };
 }
+// 其他用户只返回公开资料，不返回余额、密码等敏感字段。
+function mapPublicUser(r) {
+  return {
+    id: r.id, username: r.username, name: r.name, college: r.college,
+    role: r.role, verified: !!r.verified, credit: r.credit,
+    createdAt: n(r.created_at)
+  };
+}
 function mapItem(r) {
   return {
     id: r.id, ownerId: r.owner_id, title: r.title, category: r.category,
@@ -169,14 +177,64 @@ async function seed() {
 }
 
 async function bootstrap(currentUser) {
-  const [users] = await pool.query('SELECT id,username,name,college,role,verified,credit,balance,created_at FROM users ORDER BY created_at');
-  const [items] = await pool.query('SELECT * FROM items ORDER BY created_at DESC');
-  const [orders] = await pool.query('SELECT * FROM orders ORDER BY created_at DESC');
-  const [payments] = await pool.query('SELECT * FROM payments ORDER BY at DESC');
-  const [reviews] = await pool.query('SELECT * FROM reviews ORDER BY at DESC');
-  const [audits] = await pool.query('SELECT * FROM audits ORDER BY at DESC');
-  const safeUsers = users.map(mapUser);
-  const user = currentUser || null;
+  const isAdmin = currentUser.role === 'admin';
+  const user = currentUser;
+
+  // 学生只拿到公开在售物品、自己的物品、自己参与的订单及其资金流水。
+  const itemSql = isAdmin
+    ? 'SELECT * FROM items ORDER BY created_at DESC'
+    : `SELECT * FROM items
+       WHERE status = 'on_sale'
+          OR owner_id = ?
+          OR id IN (SELECT item_id FROM orders WHERE buyer_id = ? OR seller_id = ?)
+       ORDER BY created_at DESC`;
+  const itemArgs = isAdmin ? [] : [user.id, user.id, user.id];
+  const orderSql = isAdmin
+    ? 'SELECT * FROM orders ORDER BY created_at DESC'
+    : 'SELECT * FROM orders WHERE buyer_id = ? OR seller_id = ? ORDER BY created_at DESC';
+  const orderArgs = isAdmin ? [] : [user.id, user.id];
+  const paymentSql = isAdmin
+    ? 'SELECT * FROM payments ORDER BY at DESC'
+    : `SELECT * FROM payments
+       WHERE user_id = ?
+          OR order_id IN (SELECT id FROM orders WHERE buyer_id = ? OR seller_id = ?)
+       ORDER BY at DESC`;
+  const paymentArgs = isAdmin ? [] : [user.id, user.id, user.id];
+  const reviewSql = isAdmin
+    ? 'SELECT * FROM reviews ORDER BY at DESC'
+    : 'SELECT * FROM reviews WHERE buyer_id = ? OR seller_id = ? ORDER BY at DESC';
+  const reviewArgs = isAdmin ? [] : [user.id, user.id];
+  const auditSql = isAdmin
+    ? 'SELECT * FROM audits ORDER BY at DESC'
+    : 'SELECT * FROM audits WHERE item_id IN (SELECT id FROM items WHERE owner_id = ?) ORDER BY at DESC';
+  const auditArgs = isAdmin ? [] : [user.id];
+
+  const [[items], [orders], [payments], [reviews], [audits]] = await Promise.all([
+    pool.query(itemSql, itemArgs),
+    pool.query(orderSql, orderArgs),
+    pool.query(paymentSql, paymentArgs),
+    pool.query(reviewSql, reviewArgs),
+    pool.query(auditSql, auditArgs)
+  ]);
+
+  // 只返回当前用户及当前数据里出现过的其他用户，避免全站用户资料暴露。
+  const userIds = new Set([user.id]);
+  items.forEach(i => userIds.add(i.owner_id));
+  orders.forEach(o => { userIds.add(o.buyer_id); userIds.add(o.seller_id); });
+  reviews.forEach(r => { userIds.add(r.buyer_id); userIds.add(r.seller_id); });
+  const userIdList = [...userIds];
+  const placeholders = userIdList.map(() => '?').join(',');
+  const [userRows] = await pool.query(
+    `SELECT id, username, name, college, role, verified, credit, created_at
+     FROM users WHERE id IN (${placeholders}) ORDER BY created_at`,
+    userIdList
+  );
+  // currentUser 来自 getAuthUser，已包含余额；公开用户查询刻意不取余额。
+  const safeUsers = userRows.map(r => r.id === user.id ? user : mapPublicUser(r));
+
+  const [[studentCountRow]] = await pool.query("SELECT COUNT(*) AS c FROM users WHERE role = 'student'");
+  const [[onSaleCountRow]] = await pool.query("SELECT COUNT(*) AS c FROM items WHERE status = 'on_sale'");
+
   return {
     db: {
       users: safeUsers,
@@ -184,7 +242,11 @@ async function bootstrap(currentUser) {
       orders: orders.map(mapOrder),
       reviews: reviews.map(mapReview),
       tx: payments.map(mapPayment),
-      audits: audits.map(mapAudit)
+      audits: audits.map(mapAudit),
+      stats: {
+        studentCount: Number(studentCountRow.c),
+        onSaleCount: Number(onSaleCountRow.c)
+      }
     },
     user
   };
@@ -567,6 +629,8 @@ async function routeApi(req, res, url) {
     return sendJson(res, 200, { user: await recharge(user) });
   }
   if (p === '/api/sync' && req.method === 'POST') {
+    // 正常业务已改为按接口写入；整体快照会删全库，默认关闭。
+    if (process.env.ALLOW_SYNC !== 'true') throw httpError(404, '接口不存在');
     const operator = await requireAuth(req);
     requireAdmin(operator);
     const body = await readBody(req);
@@ -574,6 +638,10 @@ async function routeApi(req, res, url) {
     return sendJson(res, 200, { ok: true });
   }
   if (p === '/api/reset' && req.method === 'POST') {
+    // 生产环境默认禁用清库；本地演示保留，线上要显式 ALLOW_RESET=true。
+    if (process.env.NODE_ENV === 'production' && process.env.ALLOW_RESET !== 'true') {
+      throw httpError(403, '生产环境已禁用重置');
+    }
     const operator = await requireAuth(req);
     requireAdmin(operator);
     const body = await readBody(req);

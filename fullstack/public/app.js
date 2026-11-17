@@ -369,7 +369,7 @@ function viewHome(user) {
       <div class="hero-stats">
         <div class="hero-stat"><b>${onSale.length}</b><span>件在售</span></div>
         <div class="hero-stat"><b>${pending}</b><span>待审核</span></div>
-        <div class="hero-stat"><b>${db.users.filter(u => u.role === 'student').length}</b><span>位同学</span></div>
+        <div class="hero-stat"><b>${(db.stats && db.stats.studentCount) || db.users.filter(u => u.role === 'student').length}</b><span>位同学</span></div>
       </div>
     </div>
     <div class="hero-copy" style="align-self:end">
