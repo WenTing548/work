@@ -4,6 +4,7 @@ const path = require('path');
 const { URL } = require('url');
 const { exec } = require('child_process');
 const mysql = require('mysql2/promise');
+const bcrypt = require('bcryptjs');
 
 const BASE_PORT = Number(process.env.PORT || 3000);
 const DB_CONFIG = {
@@ -27,6 +28,16 @@ function httpError(status, message) {
 }
 function id(prefix) {
   return prefix + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+function isBcryptHash(value) {
+  return typeof value === 'string' && /^\$2[aby]\$\d{2}\$/.test(value);
+}
+async function hashPassword(password) {
+  return bcrypt.hash(String(password), 10);
+}
+async function verifyPassword(password, stored) {
+  if (isBcryptHash(stored)) return bcrypt.compare(String(password), String(stored));
+  return String(password) === String(stored);
 }
 function n(v) { return v == null ? null : Number(v); }
 function mapUser(r) {
@@ -73,10 +84,13 @@ async function init() {
 
 async function seed() {
   const now = Date.now();
+  const student1Password = await hashPassword('123456');
+  const student2Password = await hashPassword('123456');
+  const adminPassword = await hashPassword('admin123');
   const users = [
-    ['u1', 'student1', '123456', '林同学', '计算机学院', 'student', 1, 96, 500.00, now - 86400000 * 20],
-    ['u2', 'student2', '123456', '陈同学', '机械学院', 'student', 1, 92, 300.00, now - 86400000 * 18],
-    ['admin', 'admin', 'admin123', '运营小林', '学生事务中心', 'admin', 1, 100, 0.00, now - 86400000 * 30]
+    ['u1', 'student1', student1Password, '林同学', '计算机学院', 'student', 1, 96, 500.00, now - 86400000 * 20],
+    ['u2', 'student2', student2Password, '陈同学', '机械学院', 'student', 1, 92, 300.00, now - 86400000 * 18],
+    ['admin', 'admin', adminPassword, '运营小林', '学生事务中心', 'admin', 1, 100, 0.00, now - 86400000 * 30]
   ];
   const items = [
     ['i1', 'u2', '高等数学 第七版', '教材', 18, 45, '90', '书角有轻微磨损，内页干净，无笔记。可约图书馆门口面交。', '面交/自提', 'on_sale', now - 3600000, 38, null],
@@ -126,7 +140,13 @@ async function login(body) {
   const password = String(body.password || '');
   const [rows] = await pool.query('SELECT * FROM users WHERE username = ? LIMIT 1', [username]);
   const u = rows[0];
-  if (!u || u.password !== password) throw httpError(401, '用户名或密码不正确');
+  if (!u || !(await verifyPassword(password, u.password))) {
+    throw httpError(401, '用户名或密码不正确');
+  }
+  // 兼容旧数据：首次用明文密码登录成功后自动升级为 bcrypt。
+  if (!isBcryptHash(u.password)) {
+    await pool.query('UPDATE users SET password = ? WHERE id = ?', [await hashPassword(password), u.id]);
+  }
   return mapUser(u);
 }
 
@@ -142,10 +162,11 @@ async function register(body) {
   if (Number(exists.c) > 0) throw httpError(409, '用户名已存在');
   const uid = id('u');
   const now = Date.now();
+  const passwordHash = await hashPassword(password);
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
-    await conn.query('INSERT INTO users (id,username,password,name,college,role,verified,credit,balance,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)', [uid, username, password, name, college || '未填写', 'student', 1, 80, 300.00, now]);
+    await conn.query('INSERT INTO users (id,username,password,name,college,role,verified,credit,balance,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)', [uid, username, passwordHash, name, college || '未填写', 'student', 1, 80, 300.00, now]);
     await conn.query('INSERT INTO payments (id,user_id,order_id,type,amount,note,at) VALUES (?,?,?,?,?,?,?)', [id('t'), uid, null, '注册赠送', 300, '演示环境初始钱包', now]);
     await conn.commit();
   } catch (e) {
@@ -387,11 +408,17 @@ async function syncState(snapshot) {
     await conn.query('DELETE FROM orders');
     await conn.query('DELETE FROM items');
     if (users.length) {
+      const userRows = [];
+      for (const u of users) {
+        const rawPassword = String(u.password || '123456');
+        const passwordHash = isBcryptHash(rawPassword) ? rawPassword : await hashPassword(rawPassword);
+        userRows.push([u.id, u.username, passwordHash, u.name, u.college || '', u.role || 'student', u.verified ? 1 : 0, u.credit || 80, Number(u.balance) || 0, Number(u.createdAt) || Date.now()]);
+      }
       await conn.query(
         `INSERT INTO users (id,username,password,name,college,role,verified,credit,balance,created_at) VALUES ?
          ON DUPLICATE KEY UPDATE name=VALUES(name), college=VALUES(college), role=VALUES(role),
          verified=VALUES(verified), credit=VALUES(credit), balance=VALUES(balance)`,
-        [users.map(u => [u.id, u.username, u.password || '123456', u.name, u.college || '', u.role || 'student', u.verified ? 1 : 0, u.credit || 80, Number(u.balance) || 0, Number(u.createdAt) || Date.now()])]
+        [userRows]
       );
     }
     if (items.length) {
