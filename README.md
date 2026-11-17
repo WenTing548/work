@@ -39,6 +39,8 @@
 
 部署到公网请先看 [`fullstack/DEPLOY.md`](fullstack/DEPLOY.md)：GitHub Pages 只能部署纯前端，不能运行 Node.js + MySQL；全栈版推荐 Render + 外部 MySQL，或 Railway。
 
+Railway 从零部署和复现步骤见 [`fullstack/RAILWAY_DEPLOY.md`](fullstack/RAILWAY_DEPLOY.md)，包含常见报错和验收清单。
+
 ### 纯前端旧版
 
 - 进入 [`app/`](app/) 目录，双击 `index.html` 或 `start.bat` 即可打开。
