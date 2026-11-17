@@ -48,12 +48,11 @@ function mapUser(r) {
     balance: Number(r.balance), createdAt: n(r.created_at)
   };
 }
-// 其他用户只返回公开资料，不返回余额、密码等敏感字段。
+// 其他用户只返回交易展示所需的公开摘要；不返回用户名、余额、密码等字段。
 function mapPublicUser(r) {
   return {
-    id: r.id, username: r.username, name: r.name, college: r.college,
-    role: r.role, verified: !!r.verified, credit: r.credit,
-    createdAt: n(r.created_at)
+    id: r.id, name: r.name, college: r.college,
+    role: r.role, verified: !!r.verified, credit: r.credit
   };
 }
 function mapItem(r) {
