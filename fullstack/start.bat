@@ -22,6 +22,13 @@ if not exist node_modules (
   )
 )
 
+powershell -NoProfile -Command "$ports = 3000..3005 | Where-Object { Get-NetTCPConnection -LocalPort $_ -State Listen -ErrorAction SilentlyContinue }; foreach ($p in $ports) { try { $r = Invoke-RestMethod -Uri ('http://127.0.0.1:' + $p + '/api/health') -TimeoutSec 1; if ($r.ok) { Start-Process ('http://127.0.0.1:' + $p); exit 0 } } catch {} }; exit 1"
+if not errorlevel 1 (
+  echo An existing Shiguangji server is already running. Opening it...
+  ping -n 2 127.0.0.1 >nul
+  exit /b 0
+)
+
 echo [2/2] Starting Shiguangji full-stack demo...
 echo URL: http://127.0.0.1:3000
 echo MySQL 8.0 must be running before you start this demo.
@@ -35,3 +42,4 @@ if errorlevel 1 (
   echo Check that MySQL80 is running, and that port 3000 is not used by another program.
 )
 pause
+

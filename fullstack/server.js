@@ -517,13 +517,16 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+server.once('listening', () => {
+  const actualPort = server.address().port;
+  console.log(`拾光集 MySQL 后端已启动：http://127.0.0.1:${actualPort}`);
+  if (process.argv.includes('--open') && process.platform === 'win32') {
+    exec(`start "" http://127.0.0.1:${actualPort}`);
+  }
+});
+
 function listenWithFallback(port, attempt = 0) {
-  server.listen(port, '0.0.0.0', () => {
-    console.log(`拾光集 MySQL 后端已启动：http://127.0.0.1:${port}`);
-    if (process.argv.includes('--open') && process.platform === 'win32') {
-      exec(`start "" http://127.0.0.1:${port}`);
-    }
-  });
+  server.listen(port, '0.0.0.0');
   server.once('error', (err) => {
     if (err.code === 'EADDRINUSE' && attempt < 10) {
       console.warn(`端口 ${port} 已被占用，尝试 ${port + 1} ...`);
@@ -534,7 +537,6 @@ function listenWithFallback(port, attempt = 0) {
     }
   });
 }
-
 init().then(() => {
   listenWithFallback(BASE_PORT);
 }).catch((e) => {
